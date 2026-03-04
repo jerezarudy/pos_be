@@ -21,8 +21,15 @@ import { SalesModule } from './sales/sales.module';
     MongooseModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => {
-        const uri = configService.get<string>('MONGODB_URI');
-        if (!uri) throw new Error('Missing MONGODB_URI in environment');
+        const uri =
+          configService.get<string>('MONGODB_URI') ||
+          configService.get<string>('MONGODB_URL') ||
+          configService.get<string>('DATABASE_URL');
+        if (!uri) {
+          throw new Error(
+            'Missing MongoDB connection string. Set MONGODB_URI (or MONGODB_URL / DATABASE_URL) in the environment',
+          );
+        }
         return {
           uri,
           dbName: 'pos_db',

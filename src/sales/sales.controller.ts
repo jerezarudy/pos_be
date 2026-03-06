@@ -14,19 +14,10 @@ import { CreateSaleDto } from './dto/create-sale.dto';
 import { UpdateSaleDto } from './dto/update-sale.dto';
 import { SalesService } from './sales.service';
 
-function normalizeRole(value: unknown) {
-  const raw = typeof value === 'string' ? value : '';
-  return raw.trim().toLowerCase().replace(/[_-]+/g, ' ');
-}
-
-function isAdminUser(user: any) {
-  const role = normalizeRole(user?.role ?? user?.userType);
-  return (
-    role === 'admin' ||
-    role === 'administrator' ||
-    role === 'super admin' ||
-    role === 'superadmin'
-  );
+function normalizeStoreIdQuery(query: any) {
+  const raw = typeof query?.storeId === 'string' ? query.storeId : '';
+  const storeId = raw.trim();
+  return storeId || undefined;
 }
 
 @UseGuards(JwtAuthGuard)
@@ -41,50 +32,54 @@ export class SalesController {
 
   @Get()
   findAll(@Req() req: any, @Query() query: any) {
-    return this.salesService.findAll(query, req?.user?.storeId);
+    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
+    return this.salesService.findAll(query, storeId);
   }
 
   @Get('reports/by-item')
   reportByItem(@Req() req: any, @Query() query: any) {
-    const storeId = isAdminUser(req?.user) ? undefined : req?.user?.storeId;
+    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
     return this.salesService.reportByItem(query, storeId);
   }
 
   @Get('reports/by-category')
   reportByCategory(@Req() req: any, @Query() query: any) {
-    const storeId = isAdminUser(req?.user) ? undefined : req?.user?.storeId;
+    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
     return this.salesService.reportByCategory(query, storeId);
   }
 
   @Get('reports/by-employee')
   reportByEmployee(@Req() req: any, @Query() query: any) {
-    const storeId = isAdminUser(req?.user) ? undefined : req?.user?.storeId;
+    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
     return this.salesService.reportByEmployee(query, storeId);
   }
 
   @Get('reports/by-payment-type')
   reportByPaymentType(@Req() req: any, @Query() query: any) {
-    const storeId = isAdminUser(req?.user) ? undefined : req?.user?.storeId;
+    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
     return this.salesService.reportByPaymentType(query, storeId);
   }
 
   @Get('reports/receipts')
   reportReceipts(@Req() req: any, @Query() query: any) {
-    const storeId = isAdminUser(req?.user) ? undefined : req?.user?.storeId;
+    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
     return this.salesService.reportReceipts(query, storeId);
   }
 
   @Get(':id')
-  findOne(@Req() req: any, @Param('id') id: string) {
-    return this.salesService.findOne(id, req?.user?.storeId);
+  findOne(@Req() req: any, @Query() query: any, @Param('id') id: string) {
+    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
+    return this.salesService.findOne(id, storeId);
   }
 
   @Patch(':id')
   update(
     @Req() req: any,
+    @Query() query: any,
     @Param('id') id: string,
     @Body() dto: UpdateSaleDto,
   ) {
-    return this.salesService.update(id, dto, req?.user?.storeId);
+    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
+    return this.salesService.update(id, dto, storeId);
   }
 }

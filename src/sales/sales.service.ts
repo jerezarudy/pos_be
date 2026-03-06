@@ -38,6 +38,8 @@ function isDateOnly(value: string) {
 
 @Injectable()
 export class SalesService {
+  private supportsTransactionsCache: boolean | undefined;
+
   constructor(
     @InjectModel(Sale.name)
     private readonly saleModel: Model<SaleDocument>,
@@ -49,10 +51,33 @@ export class SalesService {
     private readonly itemsService: ItemsService,
   ) {}
 
+  private async supportsTransactions() {
+    if (this.supportsTransactionsCache !== undefined) {
+      return this.supportsTransactionsCache;
+    }
+
+    try {
+      // `model.db` is a Mongoose Connection; native driver Db is `connection.db`.
+      const nativeDb: any = (this.saleModel.db as any)?.db;
+      const cmd = async (command: Record<string, unknown>) =>
+        nativeDb?.admin?.().command(command);
+
+      const hello: any = await cmd({ hello: 1 });
+      const res = hello ?? (await cmd({ isMaster: 1 }));
+
+      this.supportsTransactionsCache =
+        Boolean(res?.setName) || res?.msg === 'isdbgrid';
+    } catch {
+      this.supportsTransactionsCache = false;
+    }
+
+    return this.supportsTransactionsCache;
+  }
+
   private assertStoreId(storeId?: string) {
     const normalized = storeId?.trim();
     if (!normalized) {
-      throw new BadRequestException('User has no assigned storeId');
+      throw new BadRequestException('storeId is required');
     }
     return normalized;
   }
@@ -70,7 +95,7 @@ export class SalesService {
     return `${year}${month}${day}`;
   }
 
-  private async nextReceiptNumber(storeId: string, session: ClientSession) {
+  private async nextReceiptNumber(storeId: string, session?: ClientSession) {
     const dayKey = this.getLocalDayKey(new Date());
 
     const counter = await this.receiptCounterModel
@@ -496,60 +521,98 @@ export class SalesService {
         ? dto.currency.trim()
         : 'PHP';
 
-    const session: ClientSession = await this.saleModel.db.startSession();
     try {
-      let createdSale: SaleDocument | undefined;
-      await session.withTransaction(async () => {
-        const receiptNumber = await this.nextReceiptNumber(storeId, session);
-        const created = await this.saleModel.create(
-          [
-            {
-              storeId,
-              posId,
-              receiptNumber,
-              currency,
-              customerId,
-              email,
-              customer: dto?.customer ?? undefined,
-              discounts,
-              items,
-              payment: dto?.payment ?? undefined,
-              totals: dto?.totals ?? undefined,
-              cashier: {
-                id: cashierId,
-                name: cashierName,
-                email: cashierEmail,
-              },
-            },
-          ],
-          { session },
-        );
-        createdSale = created[0];
+      const useTransactions = await this.supportsTransactions();
+
+      if (!useTransactions) {
+        const exists = await this.saleModel
+          .exists({ storeId, posId })
+          .exec();
+        if (exists) throw new ConflictException('Sale already exists');
 
         await this.itemsService.decrementStockForSale(items, storeId, {
-          session,
           allowCrossStore: true,
         });
-      });
 
-      if (!createdSale) {
-        throw new BadRequestException('Failed to create sale');
+        const receiptNumber = await this.nextReceiptNumber(storeId);
+
+        return await this.saleModel.create({
+          storeId,
+          posId,
+          receiptNumber,
+          currency,
+          customerId,
+          email,
+          customer: dto?.customer ?? undefined,
+          discounts,
+          items,
+          payment: dto?.payment ?? undefined,
+          totals: dto?.totals ?? undefined,
+          cashier: {
+            id: cashierId,
+            name: cashierName,
+            email: cashierEmail,
+          },
+        });
       }
 
-      return createdSale;
+      const session: ClientSession = await this.saleModel.db.startSession();
+      try {
+        let createdSale: SaleDocument | undefined;
+        await session.withTransaction(async () => {
+          const receiptNumber = await this.nextReceiptNumber(storeId, session);
+          const created = await this.saleModel.create(
+            [
+              {
+                storeId,
+                posId,
+                receiptNumber,
+                currency,
+                customerId,
+                email,
+                customer: dto?.customer ?? undefined,
+                discounts,
+                items,
+                payment: dto?.payment ?? undefined,
+                totals: dto?.totals ?? undefined,
+                cashier: {
+                  id: cashierId,
+                  name: cashierName,
+                  email: cashierEmail,
+                },
+              },
+            ],
+            { session },
+          );
+          createdSale = created[0];
+
+          await this.itemsService.decrementStockForSale(items, storeId, {
+            session,
+            allowCrossStore: true,
+          });
+        });
+
+        if (!createdSale) {
+          throw new BadRequestException('Failed to create sale');
+        }
+
+        return createdSale;
+      } finally {
+        await session.endSession();
+      }
     } catch (err: any) {
       if (err?.code === 11000) throw new ConflictException('Sale already exists');
       throw err;
-    } finally {
-      await session.endSession();
     }
   }
 
   async findAll(query: any, storeId?: string): Promise<PaginationResult<Sale>> {
-    const storeIdNormalized = this.assertStoreId(storeId);
     const { page, limit, skip } = parsePagination(query);
 
-    const filter: any = { storeId: storeIdNormalized };
+    const storeIdNormalized = storeId?.trim() || undefined;
+    const filter: any = {
+      ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
+    };
 
     const cashierId = this.parseEmployeeId(query);
     if (cashierId) {
@@ -587,13 +650,13 @@ export class SalesService {
   }
 
   async findOne(idOrPosId: string, storeId?: string) {
-    const storeIdNormalized = this.assertStoreId(storeId);
     const key = String(idOrPosId ?? '').trim();
     if (!key) throw new BadRequestException('id is required');
 
+    const storeIdNormalized = storeId?.trim() || undefined;
     const sale = await this.saleModel
       .findOne({
-        storeId: storeIdNormalized,
+        ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
         ...(isObjectIdLike(key) ? { _id: key } : { posId: key }),
       })
       .exec();
@@ -603,10 +666,10 @@ export class SalesService {
   }
 
   async update(idOrPosId: string, dto: UpdateSaleDto, storeId?: string) {
-    const storeIdNormalized = this.assertStoreId(storeId);
     const key = String(idOrPosId ?? '').trim();
     if (!key) throw new BadRequestException('id is required');
 
+    const storeIdNormalized = storeId?.trim() || undefined;
     const update: Record<string, unknown> = {
       ...(dto.currency !== undefined ? { currency: dto.currency } : {}),
       ...(dto.customerId !== undefined ? { customerId: dto.customerId } : {}),
@@ -621,7 +684,7 @@ export class SalesService {
     const updated = await this.saleModel
       .findOneAndUpdate(
         {
-          storeId: storeIdNormalized,
+          ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
           ...(isObjectIdLike(key) ? { _id: key } : { posId: key }),
         },
         update,

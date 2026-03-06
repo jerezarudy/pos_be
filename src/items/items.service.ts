@@ -23,7 +23,7 @@ export class ItemsService {
   private assertStoreId(storeId?: string) {
     const normalized = storeId?.trim();
     if (!normalized) {
-      throw new BadRequestException('User has no assigned storeId');
+      throw new BadRequestException('storeId is required');
     }
     return normalized;
   }
@@ -70,11 +70,9 @@ export class ItemsService {
     return { id, name };
   }
 
-  async generateNextSku(storeId?: string) {
-    const storeIdNormalized = this.assertStoreId(storeId);
-
+  async generateNextSku() {
     const latest = await this.itemModel
-      .findOne({ storeId: storeIdNormalized, sku: { $type: 'number' } })
+      .findOne({ sku: { $type: 'number' } })
       .sort({ sku: -1, createdAt: -1 })
       .select({ sku: 1 })
       .lean()
@@ -89,8 +87,8 @@ export class ItemsService {
     return { sku: nextSku };
   }
 
-  async create(dto: CreateItemDto, storeId?: string) {
-    const storeIdNormalized = this.assertStoreId(storeId);
+  async create(dto: CreateItemDto) {
+    const storeIdNormalized = this.assertStoreId(dto.storeId);
     this.assertNonNegativeNumber(dto.price, 'price');
     this.assertNonNegativeNumber(dto.inStock, 'inStock');
     this.assertNonNegativeNumber(dto.cost, 'cost');
@@ -104,14 +102,18 @@ export class ItemsService {
     const inStock = trackStock ? (dto.inStock ?? 0) : 0;
 
     const skuProvided = this.parseOptionalSku(dto.sku);
-    const sku =
-      skuProvided ?? (await this.generateNextSku(storeIdNormalized)).sku;
+    const sku = skuProvided ?? (await this.generateNextSku()).sku;
 
     const categoryId = this.normalizeCategoryId(dto.categoryId);
     const category = await this.resolveCategory(dto.category ?? { id: categoryId });
 
     // Prevent persisting legacy categoryId / raw category input.
-    const { categoryId: _categoryId, category: _category, ...rest } = dto as any;
+    const {
+      categoryId: _categoryId,
+      category: _category,
+      storeId: _storeId,
+      ...rest
+    } = dto as any;
 
     const created = await this.itemModel.create({
       ...rest,
@@ -126,15 +128,82 @@ export class ItemsService {
 
   async findAll(query?: any): Promise<PaginationResult<Item>> {
     const { page, limit, skip } = parsePagination(query);
-    const [data, total] = await Promise.all([
-      this.itemModel
-        .find()
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .exec(),
-      this.itemModel.countDocuments().exec(),
-    ]);
+
+    const storeIdFilter =
+      typeof query?.storeId === 'string' ? query.storeId.trim() : '';
+
+    const match: Record<string, unknown> = {
+      ...(storeIdFilter ? { storeId: storeIdFilter } : {}),
+    };
+
+    const [result] = await this.itemModel
+      .aggregate([
+        { $match: match },
+        {
+          $addFields: {
+            storeObjectId: {
+              $cond: [
+                {
+                  $regexMatch: {
+                    input: '$storeId',
+                    regex: /^[a-f\d]{24}$/i,
+                  },
+                },
+                { $toObjectId: '$storeId' },
+                null,
+              ],
+            },
+          },
+        },
+        {
+          $lookup: {
+            from: 'stores',
+            localField: 'storeObjectId',
+            foreignField: '_id',
+            as: 'storeDoc',
+          },
+        },
+        {
+          $unwind: {
+            path: '$storeDoc',
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $addFields: {
+            store: {
+              id: { $toString: '$storeDoc._id' },
+              name: '$storeDoc.name',
+            },
+          },
+        },
+        {
+          $project: {
+            storeDoc: 0,
+            storeObjectId: 0,
+          },
+        },
+        { $sort: { createdAt: -1 } },
+        {
+          $facet: {
+            data: [{ $skip: skip }, { $limit: limit }],
+            total: [{ $count: 'count' }],
+          },
+        },
+        {
+          $addFields: {
+            total: {
+              $ifNull: [{ $arrayElemAt: ['$total.count', 0] }, 0],
+            },
+          },
+        },
+        { $project: { data: 1, total: 1 } },
+      ])
+      .exec();
+
+    const data = (result?.data ?? []) as any[];
+    const total = Number(result?.total ?? 0);
+
     return {
       data,
       page,
@@ -151,8 +220,7 @@ export class ItemsService {
     return item;
   }
 
-  async update(id: string, dto: UpdateItemDto, storeId?: string) {
-    const storeIdNormalized = this.assertStoreId(storeId);
+  async update(id: string, dto: UpdateItemDto) {
     this.assertNonNegativeNumber(dto.price, 'price');
     this.assertNonNegativeNumber(dto.inStock, 'inStock');
 
@@ -166,8 +234,13 @@ export class ItemsService {
       );
     }
 
-    const update: Record<string, unknown> = { ...dto, storeId: storeIdNormalized };
+    const { storeId: storeIdRaw, ...dtoRest } = dto as any;
+    const update: Record<string, unknown> = { ...dtoRest };
     delete (update as any).categoryId;
+
+    if (storeIdRaw !== undefined) {
+      update.storeId = this.assertStoreId(storeIdRaw);
+    }
 
     if (dto.sku !== undefined) {
       update.sku = this.parseOptionalSku(dto.sku);

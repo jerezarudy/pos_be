@@ -7,7 +7,6 @@ import {
   Patch,
   Post,
   Query,
-  Req,
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -21,14 +20,14 @@ export class ItemsController {
 
   @UseGuards(JwtAuthGuard)
   @Get('next-sku')
-  nextSku(@Req() req: any) {
-    return this.itemsService.generateNextSku(req?.user?.storeId);
+  nextSku() {
+    return this.itemsService.generateNextSku();
   }
 
   @UseGuards(JwtAuthGuard)
   @Post()
-  create(@Req() req: any, @Body() dto: CreateItemDto) {
-    return this.itemsService.create(dto, req?.user?.storeId);
+  create(@Body() dto: CreateItemDto) {
+    return this.itemsService.create(dto);
   }
 
   @Get()
@@ -43,8 +42,8 @@ export class ItemsController {
 
   @UseGuards(JwtAuthGuard)
   @Patch(':id')
-  update(@Req() req: any, @Param('id') id: string, @Body() dto: UpdateItemDto) {
-    return this.itemsService.update(id, dto, req?.user?.storeId);
+  update(@Param('id') id: string, @Body() dto: UpdateItemDto) {
+    return this.itemsService.update(id, dto);
   }
 
   @UseGuards(JwtAuthGuard)

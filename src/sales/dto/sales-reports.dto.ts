@@ -3,6 +3,7 @@ export type SalesReportBucket = 'day' | 'week' | 'month';
 export type SalesReportQueryDto = {
   from?: string;
   to?: string;
+  storeId?: string;
   employeeId?: string;
   bucket?: SalesReportBucket;
   top?: string | number;

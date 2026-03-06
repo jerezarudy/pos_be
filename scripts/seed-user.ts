@@ -11,9 +11,9 @@ async function seed() {
   try {
     const usersService = app.get(UsersService);
     const created = await usersService.create({
-      email: 'test@email.com',
-      password: 'test123',
-      name: 'Test User',
+      email: 'admin@email.com',
+      password: 'U3FDFug9JmW8cNY',
+      name: 'Admin',
       role: UserRole.Admin,
     });
     // passwordHash is not included by default
@@ -37,4 +37,3 @@ seed().catch((err) => {
   console.error(err);
   process.exitCode = 1;
 });
-

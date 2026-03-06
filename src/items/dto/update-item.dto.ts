@@ -1,4 +1,5 @@
 export class UpdateItemDto {
+  storeId?: string;
   name?: string;
   categoryId?: string;
   category?: { id?: string; name?: string };

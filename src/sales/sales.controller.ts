@@ -1,6 +1,8 @@
 import {
+  BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Param,
   Patch,
@@ -10,14 +12,74 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { UserRole } from '../users/user-role.enum';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { UpdateSaleDto } from './dto/update-sale.dto';
 import { SalesService } from './sales.service';
 
-function normalizeStoreIdQuery(query: any) {
+function parseAllStoresFlag(query: any): boolean {
+  const raw = typeof query?.allStores === 'string' ? query.allStores : '';
+  const value = raw.trim().toLowerCase();
+  return value === 'true' || value === '1' || value === 'yes';
+}
+
+function parseStoreScope(query: any): {
+  storeId?: string;
+  storeIdProvided: boolean;
+  allStoresRequested: boolean;
+} {
+  const storeIdProvided = Object.prototype.hasOwnProperty.call(
+    query ?? {},
+    'storeId',
+  );
+
   const raw = typeof query?.storeId === 'string' ? query.storeId : '';
-  const storeId = raw.trim();
-  return storeId || undefined;
+  const trimmed = raw.trim();
+  const lowered = trimmed.toLowerCase();
+
+  const allStoresRequested =
+    parseAllStoresFlag(query) ||
+    (storeIdProvided && (trimmed === '' || lowered === 'all'));
+
+  const storeId =
+    trimmed && lowered !== 'all'
+      ? trimmed
+      : allStoresRequested
+        ? undefined
+        : undefined;
+
+  return { storeId, storeIdProvided, allStoresRequested };
+}
+
+function resolveStoreIdForRequest(query: any, user: any): string | undefined {
+  const role = user?.role as UserRole | undefined;
+  const isAdmin = role === UserRole.Admin;
+
+  const { storeId, storeIdProvided, allStoresRequested } =
+    parseStoreScope(query);
+
+  const userStoreId =
+    typeof user?.storeId === 'string' ? user.storeId.trim() : '';
+
+  if (storeId) {
+    if (!isAdmin && storeId !== userStoreId) {
+      throw new ForbiddenException('Not allowed to access other stores');
+    }
+    return storeId;
+  }
+
+  if (allStoresRequested || (isAdmin && !storeIdProvided)) {
+    if (!isAdmin) {
+      throw new ForbiddenException('Not allowed to access all stores');
+    }
+    return undefined;
+  }
+
+  if (!userStoreId) {
+    throw new BadRequestException('User has no assigned storeId');
+  }
+
+  return userStoreId;
 }
 
 @UseGuards(JwtAuthGuard)
@@ -32,43 +94,43 @@ export class SalesController {
 
   @Get()
   findAll(@Req() req: any, @Query() query: any) {
-    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
+    const storeId = resolveStoreIdForRequest(query, req?.user);
     return this.salesService.findAll(query, storeId);
   }
 
   @Get('reports/by-item')
   reportByItem(@Req() req: any, @Query() query: any) {
-    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
+    const storeId = resolveStoreIdForRequest(query, req?.user);
     return this.salesService.reportByItem(query, storeId);
   }
 
   @Get('reports/by-category')
   reportByCategory(@Req() req: any, @Query() query: any) {
-    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
+    const storeId = resolveStoreIdForRequest(query, req?.user);
     return this.salesService.reportByCategory(query, storeId);
   }
 
   @Get('reports/by-employee')
   reportByEmployee(@Req() req: any, @Query() query: any) {
-    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
+    const storeId = resolveStoreIdForRequest(query, req?.user);
     return this.salesService.reportByEmployee(query, storeId);
   }
 
   @Get('reports/by-payment-type')
   reportByPaymentType(@Req() req: any, @Query() query: any) {
-    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
+    const storeId = resolveStoreIdForRequest(query, req?.user);
     return this.salesService.reportByPaymentType(query, storeId);
   }
 
   @Get('reports/receipts')
   reportReceipts(@Req() req: any, @Query() query: any) {
-    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
+    const storeId = resolveStoreIdForRequest(query, req?.user);
     return this.salesService.reportReceipts(query, storeId);
   }
 
   @Get(':id')
   findOne(@Req() req: any, @Query() query: any, @Param('id') id: string) {
-    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
+    const storeId = resolveStoreIdForRequest(query, req?.user);
     return this.salesService.findOne(id, storeId);
   }
 
@@ -79,7 +141,7 @@ export class SalesController {
     @Param('id') id: string,
     @Body() dto: UpdateSaleDto,
   ) {
-    const storeId = normalizeStoreIdQuery(query) ?? req?.user?.storeId;
+    const storeId = resolveStoreIdForRequest(query, req?.user);
     return this.salesService.update(id, dto, storeId);
   }
 }

@@ -22,7 +22,10 @@ import type {
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { UpdateSaleDto } from './dto/update-sale.dto';
 import { Sale, SaleDocument } from './schemas/sale.schema';
-import { Customer, CustomerDocument } from '../customers/schemas/customer.schema';
+import {
+  Customer,
+  CustomerDocument,
+} from '../customers/schemas/customer.schema';
 import {
   ReceiptCounter,
   ReceiptCounterDocument,
@@ -295,7 +298,15 @@ export class SalesService {
                 },
               },
             },
-            { $project: { name: 1, category: 1, categoryId: 1, price: 1, cost: 1 } },
+            {
+              $project: {
+                name: 1,
+                category: 1,
+                categoryId: 1,
+                price: 1,
+                cost: 1,
+              },
+            },
           ],
           as: '__itemDoc',
         },
@@ -439,7 +450,9 @@ export class SalesService {
                 line: { $ifNull: ['$__categoryNameLine', ''] },
                 ref: {
                   $trim: {
-                    input: { $toString: { $ifNull: ['$__categoryDoc.name', ''] } },
+                    input: {
+                      $toString: { $ifNull: ['$__categoryDoc.name', ''] },
+                    },
                   },
                 },
               },
@@ -525,9 +538,7 @@ export class SalesService {
       const useTransactions = await this.supportsTransactions();
 
       if (!useTransactions) {
-        const exists = await this.saleModel
-          .exists({ storeId, posId })
-          .exec();
+        const exists = await this.saleModel.exists({ storeId, posId }).exec();
         if (exists) throw new ConflictException('Sale already exists');
 
         await this.itemsService.decrementStockForSale(items, storeId, {
@@ -601,7 +612,8 @@ export class SalesService {
         await session.endSession();
       }
     } catch (err: any) {
-      if (err?.code === 11000) throw new ConflictException('Sale already exists');
+      if (err?.code === 11000)
+        throw new ConflictException('Sale already exists');
       throw err;
     }
   }
@@ -613,6 +625,22 @@ export class SalesService {
     const filter: any = {
       ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
     };
+
+    const startDate = query?.startDate ?? query?.from ?? query?.start;
+    const endDate = query?.endDate ?? query?.to ?? query?.end;
+    if (startDate !== undefined || endDate !== undefined) {
+      if (!startDate || !endDate) {
+        throw new BadRequestException('startDate/endDate is required');
+      }
+
+      const from = this.parseDate(startDate);
+      const to = this.parseDate(endDate, { endOfDay: true });
+      if (from > to) {
+        throw new BadRequestException('startDate must be <= endDate');
+      }
+
+      filter.createdAt = { $gte: from, $lte: to };
+    }
 
     const cashierId = this.parseEmployeeId(query);
     if (cashierId) {
@@ -674,7 +702,9 @@ export class SalesService {
       ...(dto.currency !== undefined ? { currency: dto.currency } : {}),
       ...(dto.customerId !== undefined ? { customerId: dto.customerId } : {}),
       ...(dto.customer !== undefined ? { customer: dto.customer } : {}),
-      ...(dto.email !== undefined ? { email: this.normalizeEmail(dto.email) } : {}),
+      ...(dto.email !== undefined
+        ? { email: this.normalizeEmail(dto.email) }
+        : {}),
       ...(dto.discounts !== undefined ? { discounts: dto.discounts } : {}),
       ...(dto.items !== undefined ? { items: dto.items } : {}),
       ...(dto.payment !== undefined ? { payment: dto.payment } : {}),
@@ -719,7 +749,8 @@ export class SalesService {
     const normalizeItemKey = (itemId?: string, itemName?: string) => {
       const id = typeof itemId === 'string' ? itemId.trim() : '';
       if (id) return id;
-      const name = typeof itemName === 'string' ? itemName.trim().toLowerCase() : '';
+      const name =
+        typeof itemName === 'string' ? itemName.trim().toLowerCase() : '';
       return name;
     };
 
@@ -878,7 +909,11 @@ export class SalesService {
       const key = row.key;
       const existing =
         seriesMap.get(key) ??
-        ({ itemId: row.itemId, itemName: row.itemName, points: [] } as SalesItemSeries);
+        ({
+          itemId: row.itemId,
+          itemName: row.itemName,
+          points: [],
+        } as SalesItemSeries);
       existing.points.push({ x: row.x, y: Number(row.y ?? 0) });
       seriesMap.set(key, existing as SalesItemSeries);
     }
@@ -903,7 +938,9 @@ export class SalesService {
   async reportByCategory(
     query: any,
     storeId?: string,
-  ): Promise<PaginationResult<SalesByCategoryRow> & { from: string; to: string }> {
+  ): Promise<
+    PaginationResult<SalesByCategoryRow> & { from: string; to: string }
+  > {
     const { match, from, to } = this.baseMatchForReports(query, storeId);
     const { page, limit, skip } = parsePagination(query, {
       defaultLimit: 10,
@@ -1005,14 +1042,19 @@ export class SalesService {
           $addFields: {
             __paymentType: {
               $let: {
-                vars: { t: { $trim: { input: { $ifNull: ['$payment.type', ''] } } } },
+                vars: {
+                  t: { $trim: { input: { $ifNull: ['$payment.type', ''] } } },
+                },
                 in: {
                   $cond: [{ $gt: [{ $strLenCP: '$$t' }, 0] }, '$$t', 'Unknown'],
                 },
               },
             },
             __amount: num({
-              $ifNull: ['$totals.amountDue', { $ifNull: ['$totals.amountPaid', 0] }],
+              $ifNull: [
+                '$totals.amountDue',
+                { $ifNull: ['$totals.amountPaid', 0] },
+              ],
             }),
           },
         },
@@ -1055,85 +1097,90 @@ export class SalesService {
 
     const [employeesFromSales, users] = await Promise.all([
       this.saleModel
-      .aggregate([
-        { $match: match },
-        {
-          $addFields: {
-            __grossSales: num({
-              $ifNull: [
-                '$totals.amountDue',
-                { $ifNull: ['$totals.amountPaid', 0] },
-              ],
-            }),
-            __discounts: {
-              $sum: {
-                $map: {
-                  input: { $ifNull: ['$discounts', []] },
-                  as: 'd',
-                  in: num({
-                    $ifNull: [
-                      '$$d.amount',
-                      {
-                        $ifNull: [
-                          '$$d.value',
-                          {
-                            $ifNull: [
-                              '$$d.discount',
-                              { $ifNull: ['$$d.discountAmount', 0] },
-                            ],
-                          },
-                        ],
-                      },
-                    ],
-                  }),
+        .aggregate([
+          { $match: match },
+          {
+            $addFields: {
+              __grossSales: num({
+                $ifNull: [
+                  '$totals.amountDue',
+                  { $ifNull: ['$totals.amountPaid', 0] },
+                ],
+              }),
+              __discounts: {
+                $sum: {
+                  $map: {
+                    input: { $ifNull: ['$discounts', []] },
+                    as: 'd',
+                    in: num({
+                      $ifNull: [
+                        '$$d.amount',
+                        {
+                          $ifNull: [
+                            '$$d.value',
+                            {
+                              $ifNull: [
+                                '$$d.discount',
+                                { $ifNull: ['$$d.discountAmount', 0] },
+                              ],
+                            },
+                          ],
+                        },
+                      ],
+                    }),
+                  },
                 },
               },
             },
           },
-        },
-        {
-          $group: {
-            _id: {
-              employeeId: '$cashier.id',
-              name: '$cashier.name',
-              email: '$cashier.email',
-            },
-            grossSales: { $sum: '$__grossSales' },
-            discounts: { $sum: '$__discounts' },
-            receipts: { $sum: 1 },
-          },
-        },
-        {
-          $addFields: {
-            refunds: 0,
-            netSales: { $subtract: ['$grossSales', '$discounts'] },
-            averageSale: {
-              $cond: [
-                { $gt: ['$receipts', 0] },
-                { $divide: [{ $subtract: ['$grossSales', '$discounts'] }, '$receipts'] },
-                0,
-              ],
+          {
+            $group: {
+              _id: {
+                employeeId: '$cashier.id',
+                name: '$cashier.name',
+                email: '$cashier.email',
+              },
+              grossSales: { $sum: '$__grossSales' },
+              discounts: { $sum: '$__discounts' },
+              receipts: { $sum: 1 },
             },
           },
-        },
-        {
-          $project: {
-            _id: 0,
-            employeeId: '$_id.employeeId',
-            name: '$_id.name',
-            email: '$_id.email',
-            grossSales: 1,
-            refunds: 1,
-            discounts: 1,
-            netSales: 1,
-            receipts: 1,
-            averageSale: 1,
-            customersSignedUp: { $literal: 0 },
+          {
+            $addFields: {
+              refunds: 0,
+              netSales: { $subtract: ['$grossSales', '$discounts'] },
+              averageSale: {
+                $cond: [
+                  { $gt: ['$receipts', 0] },
+                  {
+                    $divide: [
+                      { $subtract: ['$grossSales', '$discounts'] },
+                      '$receipts',
+                    ],
+                  },
+                  0,
+                ],
+              },
+            },
           },
-        },
-        { $sort: { netSales: -1 } },
-      ])
-      .exec() as Promise<SalesByEmployeeRow[]>,
+          {
+            $project: {
+              _id: 0,
+              employeeId: '$_id.employeeId',
+              name: '$_id.name',
+              email: '$_id.email',
+              grossSales: 1,
+              refunds: 1,
+              discounts: 1,
+              netSales: 1,
+              receipts: 1,
+              averageSale: 1,
+              customersSignedUp: { $literal: 0 },
+            },
+          },
+          { $sort: { netSales: -1 } },
+        ])
+        .exec() as Promise<SalesByEmployeeRow[]>,
       this.usersService.listSalesEmployees({
         storeId: storeIdNormalized,
         userId: employeeIdFilter,
@@ -1181,7 +1228,10 @@ export class SalesService {
         .exec();
 
       const signedUpMap = new Map<string, number>(
-        customersByActor.map((r: any) => [String(r?._id ?? ''), Number(r?.count ?? 0)]),
+        customersByActor.map((r: any) => [
+          String(r?._id ?? ''),
+          Number(r?.count ?? 0),
+        ]),
       );
 
       for (const e of employeesMap.values()) {

@@ -18,7 +18,7 @@ export function parsePagination(
   opts?: { defaultLimit?: number; maxLimit?: number },
 ): PaginationParams {
   const defaultLimit = opts?.defaultLimit ?? 20;
-  const maxLimit = opts?.maxLimit ?? 100;
+  const maxLimit = opts?.maxLimit ?? 2000;
 
   const pageRaw = query?.page;
   const limitRaw = query?.limit;
@@ -34,4 +34,3 @@ export function parsePagination(
 
   return { page, limit, skip: (page - 1) * limit };
 }
-

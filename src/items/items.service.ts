@@ -127,7 +127,7 @@ export class ItemsService {
   }
 
   async findAll(query?: any): Promise<PaginationResult<Item>> {
-    const { page, limit, skip } = parsePagination(query);
+    const { page, limit, skip } = parsePagination(query, { maxLimit: 2000 });
 
     const storeIdFilter =
       typeof query?.storeId === 'string' ? query.storeId.trim() : '';

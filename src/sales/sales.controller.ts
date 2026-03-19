@@ -14,6 +14,7 @@ import {
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UserRole } from '../users/user-role.enum';
 import { CreateSaleDto } from './dto/create-sale.dto';
+import { RefundSaleDto } from './dto/refund-sale.dto';
 import { UpdateSaleDto } from './dto/update-sale.dto';
 import { SalesService } from './sales.service';
 
@@ -90,6 +91,23 @@ export class SalesController {
   @Post()
   create(@Req() req: any, @Body() dto: CreateSaleDto) {
     return this.salesService.create(dto, req?.user);
+  }
+
+  @Post(':id/refund')
+  refund(
+    @Req() req: any,
+    @Query() query: any,
+    @Param('id') id: string,
+    @Body() dto: RefundSaleDto,
+  ) {
+    const storeId = resolveStoreIdForRequest(query, req?.user);
+    return this.salesService.refund(id, dto, req?.user, storeId);
+  }
+
+  @Get('refunds')
+  findRefunds(@Req() req: any, @Query() query: any) {
+    const storeId = resolveStoreIdForRequest(query, req?.user);
+    return this.salesService.findAll({ ...query, type: 'refund' }, storeId);
   }
 
   @Get()

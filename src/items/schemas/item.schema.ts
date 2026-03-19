@@ -44,6 +44,9 @@ export class Item {
   @Prop()
   description?: string;
 
+  @Prop({ trim: true })
+  imageUrl?: string;
+
   @Prop({ default: false })
   trackStock!: boolean;
 

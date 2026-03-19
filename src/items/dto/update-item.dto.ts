@@ -7,6 +7,7 @@ export class UpdateItemDto {
   barcode?: string;
   price?: number;
   description?: string;
+  imageUrl?: string;
   trackStock?: boolean;
   inStock?: number;
 }

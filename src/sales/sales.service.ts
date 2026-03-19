@@ -20,8 +20,9 @@ import type {
   SalesReportBucket,
 } from './dto/sales-reports.dto';
 import { CreateSaleDto } from './dto/create-sale.dto';
+import { RefundSaleDto } from './dto/refund-sale.dto';
 import { UpdateSaleDto } from './dto/update-sale.dto';
-import { Sale, SaleDocument } from './schemas/sale.schema';
+import { Sale, SaleDocument, SaleTransactionType } from './schemas/sale.schema';
 import {
   Customer,
   CustomerDocument,
@@ -85,10 +86,100 @@ export class SalesService {
     return normalized;
   }
 
+  private buildSaleLookup(
+    idOrPosId: string,
+    storeId?: string,
+    extraFilter?: Record<string, unknown>,
+  ) {
+    const key = String(idOrPosId ?? '').trim();
+    if (!key) throw new BadRequestException('id is required');
+
+    const storeIdNormalized = storeId?.trim() || undefined;
+    return {
+      ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
+      ...(isObjectIdLike(key) ? { _id: key } : { posId: key }),
+      ...(extraFilter ?? {}),
+    };
+  }
+
   private normalizeEmail(value: unknown) {
     const raw = typeof value === 'string' ? value : '';
     const email = raw.trim().toLowerCase();
     return email || undefined;
+  }
+
+  private normalizeReason(value: unknown) {
+    const raw = typeof value === 'string' ? value : '';
+    const reason = raw.trim();
+    return reason || undefined;
+  }
+
+  private parseTransactionType(
+    value: unknown,
+  ): SaleTransactionType | undefined {
+    const raw = typeof value === 'string' ? value : '';
+    const normalized = raw.trim().toLowerCase();
+
+    if (!normalized || normalized === 'all') return undefined;
+    if (normalized === SaleTransactionType.Sale || normalized === 'sales') {
+      return SaleTransactionType.Sale;
+    }
+    if (
+      normalized === SaleTransactionType.Refund ||
+      normalized === 'refunds' ||
+      normalized === 'return'
+    ) {
+      return SaleTransactionType.Refund;
+    }
+
+    throw new BadRequestException('type must be sale or refund');
+  }
+
+  private parseTransactionTypeFromQuery(query: any) {
+    return this.parseTransactionType(query?.transactionType ?? query?.type);
+  }
+
+  private toPositiveMoney(value: unknown) {
+    const num = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(num)) return undefined;
+    return Math.abs(num);
+  }
+
+  private cloneRefundTotals(totals?: any) {
+    if (!totals) return undefined;
+
+    return {
+      ...totals,
+      ...(totals?.amountDue !== undefined
+        ? { amountDue: this.toPositiveMoney(totals.amountDue) }
+        : {}),
+      ...(totals?.amountPaid !== undefined
+        ? { amountPaid: this.toPositiveMoney(totals.amountPaid) }
+        : {}),
+      ...(totals?.change !== undefined
+        ? { change: this.toPositiveMoney(totals.change) }
+        : {}),
+    };
+  }
+
+  private buildRefundPosId(posId: unknown) {
+    const normalized = String(posId ?? '').trim();
+    if (!normalized) throw new BadRequestException('Sale is missing posId');
+    return `${normalized}-refund`;
+  }
+
+  private async resolveCashier(user: any) {
+    const cashierId = String(user?.sub ?? '').trim();
+    if (!cashierId) throw new BadRequestException('Missing cashier user id');
+
+    const cashierEmail = this.normalizeEmail(user?.email);
+    const cashierName = (await this.usersService.findOne(cashierId))?.name;
+
+    return {
+      id: cashierId,
+      name: cashierName,
+      email: cashierEmail,
+    };
   }
 
   private getLocalDayKey(date: Date) {
@@ -177,11 +268,13 @@ export class SalesService {
     storeId?: string,
   ): { match: Record<string, unknown>; from: Date; to: Date } {
     const { from, to } = this.parseReportRange(query);
+    const transactionType = this.parseTransactionTypeFromQuery(query);
 
     const storeIdNormalized = storeId?.trim() || undefined;
 
     const match: Record<string, unknown> = {
       ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
+      ...(transactionType ? { transactionType } : {}),
       createdAt: { $gte: from, $lte: to },
     };
 
@@ -267,6 +360,13 @@ export class SalesService {
         $addFields: {
           __qty: {
             $cond: [{ $gt: ['$__qtyNum', 0] }, { $toInt: '$__qtyNum' }, 0],
+          },
+          __direction: {
+            $cond: [
+              { $eq: ['$transactionType', SaleTransactionType.Refund] },
+              -1,
+              1,
+            ],
           },
           __itemObjectId: {
             $cond: [
@@ -506,6 +606,19 @@ export class SalesService {
           __grossProfit: { $subtract: ['$__netSales', '$__costOfGoods'] },
         },
       },
+      {
+        $addFields: {
+          __signedQty: { $multiply: ['$__qty', '$__direction'] },
+          __signedGrossSales: { $multiply: ['$__grossSales', '$__direction'] },
+          __signedNetSales: { $multiply: ['$__netSales', '$__direction'] },
+          __signedCostOfGoods: {
+            $multiply: ['$__costOfGoods', '$__direction'],
+          },
+          __signedGrossProfit: {
+            $multiply: ['$__grossProfit', '$__direction'],
+          },
+        },
+      },
     ];
   }
 
@@ -518,11 +631,7 @@ export class SalesService {
     if (items.length === 0) throw new BadRequestException('items is required');
     const discounts = Array.isArray(dto?.discounts) ? dto.discounts : [];
 
-    const cashierId = String(user?.sub ?? '').trim();
-    if (!cashierId) throw new BadRequestException('Missing cashier user id');
-
-    const cashierEmail = this.normalizeEmail(user?.email);
-    const cashierName = (await this.usersService.findOne(cashierId))?.name;
+    const cashier = await this.resolveCashier(user);
 
     const customerId =
       String(dto?.customerId ?? dto?.customer?.id ?? '').trim() || undefined;
@@ -549,6 +658,7 @@ export class SalesService {
 
         return await this.saleModel.create({
           storeId,
+          transactionType: SaleTransactionType.Sale,
           posId,
           receiptNumber,
           currency,
@@ -559,11 +669,7 @@ export class SalesService {
           items,
           payment: dto?.payment ?? undefined,
           totals: dto?.totals ?? undefined,
-          cashier: {
-            id: cashierId,
-            name: cashierName,
-            email: cashierEmail,
-          },
+          cashier,
         });
       }
 
@@ -576,6 +682,7 @@ export class SalesService {
             [
               {
                 storeId,
+                transactionType: SaleTransactionType.Sale,
                 posId,
                 receiptNumber,
                 currency,
@@ -586,11 +693,7 @@ export class SalesService {
                 items,
                 payment: dto?.payment ?? undefined,
                 totals: dto?.totals ?? undefined,
-                cashier: {
-                  id: cashierId,
-                  name: cashierName,
-                  email: cashierEmail,
-                },
+                cashier,
               },
             ],
             { session },
@@ -618,12 +721,153 @@ export class SalesService {
     }
   }
 
+  async refund(
+    idOrPosId: string,
+    dto: RefundSaleDto,
+    user: any,
+    storeId?: string,
+  ) {
+    const refundReason = this.normalizeReason(dto?.reason);
+    const cashier = await this.resolveCashier(user);
+    const lookup = this.buildSaleLookup(idOrPosId, storeId, {
+      transactionType: SaleTransactionType.Sale,
+    });
+    const useTransactions = await this.supportsTransactions();
+
+    try {
+      if (!useTransactions) {
+        const sale = await this.saleModel.findOne(lookup).exec();
+        if (!sale) throw new NotFoundException('Sale not found');
+        if (sale.refundSaleId || sale.refundedAt) {
+          throw new ConflictException('Sale already refunded');
+        }
+
+        await this.itemsService.incrementStockForSale(
+          sale.items,
+          sale.storeId,
+          {
+            allowCrossStore: true,
+          },
+        );
+
+        const receiptNumber = await this.nextReceiptNumber(sale.storeId);
+        const refund = await this.saleModel.create({
+          storeId: sale.storeId,
+          transactionType: SaleTransactionType.Refund,
+          posId: this.buildRefundPosId(sale.posId),
+          receiptNumber,
+          currency: sale.currency ?? 'PHP',
+          customerId: sale.customerId,
+          sourceSaleId: String(sale._id),
+          refundReason,
+          email: sale.email,
+          customer: sale.customer,
+          discounts: sale.discounts ?? [],
+          items: sale.items ?? [],
+          payment: sale.payment ?? undefined,
+          totals: this.cloneRefundTotals(sale.totals),
+          cashier,
+        });
+
+        await this.saleModel
+          .findByIdAndUpdate(sale._id, {
+            refundSaleId: String(refund._id),
+            refundedAt: new Date(),
+            refundReason,
+          })
+          .exec();
+
+        return refund;
+      }
+
+      const session: ClientSession = await this.saleModel.db.startSession();
+      try {
+        let refundDoc: SaleDocument | undefined;
+
+        await session.withTransaction(async () => {
+          const sale = await this.saleModel
+            .findOne(lookup)
+            .session(session)
+            .exec();
+          if (!sale) throw new NotFoundException('Sale not found');
+          if (sale.refundSaleId || sale.refundedAt) {
+            throw new ConflictException('Sale already refunded');
+          }
+
+          const receiptNumber = await this.nextReceiptNumber(
+            sale.storeId,
+            session,
+          );
+          const created = await this.saleModel.create(
+            [
+              {
+                storeId: sale.storeId,
+                transactionType: SaleTransactionType.Refund,
+                posId: this.buildRefundPosId(sale.posId),
+                receiptNumber,
+                currency: sale.currency ?? 'PHP',
+                customerId: sale.customerId,
+                sourceSaleId: String(sale._id),
+                refundReason,
+                email: sale.email,
+                customer: sale.customer,
+                discounts: sale.discounts ?? [],
+                items: sale.items ?? [],
+                payment: sale.payment ?? undefined,
+                totals: this.cloneRefundTotals(sale.totals),
+                cashier,
+              },
+            ],
+            { session },
+          );
+          refundDoc = created[0];
+
+          await this.itemsService.incrementStockForSale(
+            sale.items,
+            sale.storeId,
+            {
+              session,
+              allowCrossStore: true,
+            },
+          );
+
+          await this.saleModel
+            .findByIdAndUpdate(
+              sale._id,
+              {
+                refundSaleId: String(refundDoc._id),
+                refundedAt: new Date(),
+                refundReason,
+              },
+              { session },
+            )
+            .exec();
+        });
+
+        if (!refundDoc) {
+          throw new BadRequestException('Failed to create refund');
+        }
+
+        return refundDoc;
+      } finally {
+        await session.endSession();
+      }
+    } catch (err: any) {
+      if (err?.code === 11000) {
+        throw new ConflictException('Sale already refunded');
+      }
+      throw err;
+    }
+  }
+
   async findAll(query: any, storeId?: string): Promise<PaginationResult<Sale>> {
     const { page, limit, skip } = parsePagination(query);
+    const transactionType = this.parseTransactionTypeFromQuery(query);
 
     const storeIdNormalized = storeId?.trim() || undefined;
     const filter: any = {
       ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
+      ...(transactionType ? { transactionType } : {}),
     };
 
     const startDate = query?.startDate ?? query?.from ?? query?.start;
@@ -649,11 +893,27 @@ export class SalesService {
 
     const q = String(query?.q ?? '').trim();
     if (q) {
+      const sourceSales = await this.saleModel
+        .find({
+          ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
+          transactionType: SaleTransactionType.Sale,
+          receiptNumber: { $regex: q, $options: 'i' },
+        })
+        .select({ _id: 1 })
+        .lean()
+        .exec();
+
+      const sourceSaleIds = sourceSales.map((sale: any) => String(sale?._id ?? ''));
+
       filter.$or = [
         { posId: { $regex: q, $options: 'i' } },
+        { receiptNumber: { $regex: q, $options: 'i' } },
         { email: { $regex: q, $options: 'i' } },
         { 'cashier.name': { $regex: q, $options: 'i' } },
         { 'cashier.email': { $regex: q, $options: 'i' } },
+        ...(sourceSaleIds.length > 0
+          ? [{ sourceSaleId: { $in: sourceSaleIds } }]
+          : []),
       ];
     }
 
@@ -667,26 +927,65 @@ export class SalesService {
       this.saleModel.countDocuments(filter).exec(),
     ]);
 
+    const refundSourceSaleIds = data
+      .filter((sale: any) => sale?.transactionType === SaleTransactionType.Refund)
+      .map((sale: any) => String(sale?.sourceSaleId ?? '').trim())
+      .filter((id: string) => id.length > 0);
+
+    const sourceReceiptMap =
+      refundSourceSaleIds.length > 0
+        ? new Map(
+            (
+              await this.saleModel
+                .find({
+                  ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
+                  _id: { $in: refundSourceSaleIds },
+                })
+                .select({ _id: 1, receiptNumber: 1 })
+                .lean()
+                .exec()
+            ).map((sale: any) => [
+              String(sale?._id ?? ''),
+              typeof sale?.receiptNumber === 'string'
+                ? sale.receiptNumber
+                : undefined,
+            ]),
+          )
+        : new Map<string, string | undefined>();
+
+    const enrichedData = data.map((sale: any) => {
+      const sourceSaleId = String(sale?.sourceSaleId ?? '').trim();
+      const sourceReceiptNumber = sourceReceiptMap.get(sourceSaleId);
+      const plainSale =
+        typeof sale?.toObject === 'function' ? sale.toObject() : { ...sale };
+
+      if (
+        plainSale?.transactionType === SaleTransactionType.Refund &&
+        sourceReceiptNumber
+      ) {
+        return {
+          ...plainSale,
+          refundReceiptNumber: plainSale.receiptNumber,
+          receiptNumber: sourceReceiptNumber,
+        };
+      }
+
+      return plainSale;
+    });
+
     return {
-      data,
+      data: enrichedData as any,
       page,
       limit,
       total,
-      hasNext: skip + data.length < total,
+      hasNext: skip + enrichedData.length < total,
       hasPrev: page > 1,
     };
   }
 
   async findOne(idOrPosId: string, storeId?: string) {
-    const key = String(idOrPosId ?? '').trim();
-    if (!key) throw new BadRequestException('id is required');
-
-    const storeIdNormalized = storeId?.trim() || undefined;
     const sale = await this.saleModel
-      .findOne({
-        ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
-        ...(isObjectIdLike(key) ? { _id: key } : { posId: key }),
-      })
+      .findOne(this.buildSaleLookup(idOrPosId, storeId))
       .exec();
 
     if (!sale) throw new NotFoundException('Sale not found');
@@ -694,10 +993,6 @@ export class SalesService {
   }
 
   async update(idOrPosId: string, dto: UpdateSaleDto, storeId?: string) {
-    const key = String(idOrPosId ?? '').trim();
-    if (!key) throw new BadRequestException('id is required');
-
-    const storeIdNormalized = storeId?.trim() || undefined;
     const update: Record<string, unknown> = {
       ...(dto.currency !== undefined ? { currency: dto.currency } : {}),
       ...(dto.customerId !== undefined ? { customerId: dto.customerId } : {}),
@@ -712,14 +1007,9 @@ export class SalesService {
     };
 
     const updated = await this.saleModel
-      .findOneAndUpdate(
-        {
-          ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
-          ...(isObjectIdLike(key) ? { _id: key } : { posId: key }),
-        },
-        update,
-        { new: true },
-      )
+      .findOneAndUpdate(this.buildSaleLookup(idOrPosId, storeId), update, {
+        new: true,
+      })
       .exec();
 
     if (!updated) throw new NotFoundException('Sale not found');
@@ -786,10 +1076,10 @@ export class SalesService {
         itemName: { $first: '$__itemName' },
         categoryId: { $first: '$__categoryId' },
         categoryName: { $first: '$__categoryName' },
-        itemsSold: { $sum: '$__qty' },
-        netSales: { $sum: '$__netSales' },
-        costOfGoods: { $sum: '$__costOfGoods' },
-        grossProfit: { $sum: '$__grossProfit' },
+        itemsSold: { $sum: '$__signedQty' },
+        netSales: { $sum: '$__signedNetSales' },
+        costOfGoods: { $sum: '$__signedCostOfGoods' },
+        grossProfit: { $sum: '$__signedGrossProfit' },
       },
     };
 
@@ -880,7 +1170,7 @@ export class SalesService {
                 },
                 itemId: { $first: '$__itemIdStr' },
                 itemName: { $first: '$__itemName' },
-                netSales: { $sum: '$__netSales' },
+                netSales: { $sum: '$__signedNetSales' },
               },
             },
             {
@@ -953,10 +1243,10 @@ export class SalesService {
           categoryId: '$__categoryId',
           categoryName: '$__categoryName',
         },
-        itemsSold: { $sum: '$__qty' },
-        netSales: { $sum: '$__netSales' },
-        costOfGoods: { $sum: '$__costOfGoods' },
-        grossProfit: { $sum: '$__grossProfit' },
+        itemsSold: { $sum: '$__signedQty' },
+        netSales: { $sum: '$__signedNetSales' },
+        costOfGoods: { $sum: '$__signedCostOfGoods' },
+        grossProfit: { $sum: '$__signedGrossProfit' },
       },
     };
 
@@ -1050,19 +1340,34 @@ export class SalesService {
                 },
               },
             },
-            __amount: num({
-              $ifNull: [
-                '$totals.amountDue',
-                { $ifNull: ['$totals.amountPaid', 0] },
-              ],
-            }),
+            __amount: {
+              $abs: num({
+                $ifNull: [
+                  '$totals.amountDue',
+                  { $ifNull: ['$totals.amountPaid', 0] },
+                ],
+              }),
+            },
+            __isRefund: {
+              $eq: ['$transactionType', SaleTransactionType.Refund],
+            },
           },
         },
         {
           $group: {
             _id: '$__paymentType',
-            paymentTransactions: { $sum: 1 },
-            paymentAmount: { $sum: '$__amount' },
+            paymentTransactions: {
+              $sum: { $cond: ['$__isRefund', 0, 1] },
+            },
+            paymentAmount: {
+              $sum: { $cond: ['$__isRefund', 0, '$__amount'] },
+            },
+            refundTransactions: {
+              $sum: { $cond: ['$__isRefund', 1, 0] },
+            },
+            refundAmount: {
+              $sum: { $cond: ['$__isRefund', '$__amount', 0] },
+            },
           },
         },
         {
@@ -1071,12 +1376,12 @@ export class SalesService {
             paymentType: '$_id',
             paymentTransactions: 1,
             paymentAmount: 1,
-            refundTransactions: { $literal: 0 },
-            refundAmount: { $literal: 0 },
-            netAmount: '$paymentAmount',
+            refundTransactions: 1,
+            refundAmount: 1,
+            netAmount: { $subtract: ['$paymentAmount', '$refundAmount'] },
           },
         },
-        { $sort: { paymentAmount: -1 } },
+        { $sort: { netAmount: -1, paymentAmount: -1 } },
       ])
       .exec()) as SalesByPaymentTypeRow[];
 
@@ -1101,12 +1406,17 @@ export class SalesService {
           { $match: match },
           {
             $addFields: {
-              __grossSales: num({
-                $ifNull: [
-                  '$totals.amountDue',
-                  { $ifNull: ['$totals.amountPaid', 0] },
-                ],
-              }),
+              __amount: {
+                $abs: num({
+                  $ifNull: [
+                    '$totals.amountDue',
+                    { $ifNull: ['$totals.amountPaid', 0] },
+                  ],
+                }),
+              },
+              __isRefund: {
+                $eq: ['$transactionType', SaleTransactionType.Refund],
+              },
               __discounts: {
                 $sum: {
                   $map: {
@@ -1140,21 +1450,39 @@ export class SalesService {
                 name: '$cashier.name',
                 email: '$cashier.email',
               },
-              grossSales: { $sum: '$__grossSales' },
-              discounts: { $sum: '$__discounts' },
-              receipts: { $sum: 1 },
+              grossSales: {
+                $sum: { $cond: ['$__isRefund', 0, '$__amount'] },
+              },
+              refunds: {
+                $sum: { $cond: ['$__isRefund', '$__amount', 0] },
+              },
+              discounts: {
+                $sum: { $cond: ['$__isRefund', 0, '$__discounts'] },
+              },
+              receipts: {
+                $sum: { $cond: ['$__isRefund', 0, 1] },
+              },
             },
           },
           {
             $addFields: {
-              refunds: 0,
-              netSales: { $subtract: ['$grossSales', '$discounts'] },
+              netSales: {
+                $subtract: [
+                  { $subtract: ['$grossSales', '$discounts'] },
+                  '$refunds',
+                ],
+              },
               averageSale: {
                 $cond: [
                   { $gt: ['$receipts', 0] },
                   {
                     $divide: [
-                      { $subtract: ['$grossSales', '$discounts'] },
+                      {
+                        $subtract: [
+                          { $subtract: ['$grossSales', '$discounts'] },
+                          '$refunds',
+                        ],
+                      },
                       '$receipts',
                     ],
                   },
@@ -1274,6 +1602,7 @@ export class SalesService {
     const storeIdNormalized = storeId?.trim() || undefined;
     const { from, to } = this.parseReportRange(query);
     const employeeId = this.parseEmployeeId(query);
+    const transactionType = this.parseTransactionTypeFromQuery(query);
     const { page, limit, skip } = parsePagination(query, {
       defaultLimit: 10,
       maxLimit: 200,
@@ -1281,50 +1610,166 @@ export class SalesService {
 
     const filter: any = {
       ...(storeIdNormalized ? { storeId: storeIdNormalized } : {}),
+      ...(transactionType ? { transactionType } : {}),
       createdAt: { $gte: from, $lte: to },
     };
     if (employeeId) filter['cashier.id'] = employeeId;
 
     const q = String(query?.q ?? '').trim();
+
+    const pipeline: PipelineStage[] = [
+      { $match: filter },
+      {
+        $lookup: {
+          from: 'sales',
+          let: {
+            sourceSaleObjectId: {
+              $convert: {
+                input: '$sourceSaleId',
+                to: 'objectId',
+                onError: null,
+                onNull: null,
+              },
+            },
+            storeId: '$storeId',
+          },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$_id', '$$sourceSaleObjectId'] },
+                    { $eq: ['$storeId', '$$storeId'] },
+                  ],
+                },
+              },
+            },
+            { $project: { receiptNumber: 1 } },
+          ],
+          as: '__sourceSale',
+        },
+      },
+      {
+        $addFields: {
+          __sourceSale: { $first: '$__sourceSale' },
+        },
+      },
+      {
+        $addFields: {
+          __sourceReceiptNumber: {
+            $trim: {
+              input: { $ifNull: ['$__sourceSale.receiptNumber', ''] },
+            },
+          },
+          __resolvedReceiptNo: {
+            $let: {
+              vars: {
+                source: {
+                  $trim: {
+                    input: { $ifNull: ['$__sourceSale.receiptNumber', ''] },
+                  },
+                },
+                fallback: {
+                  $trim: {
+                    input: {
+                      $ifNull: ['$receiptNumber', { $ifNull: ['$posId', ''] }],
+                    },
+                  },
+                },
+              },
+              in: {
+                $cond: [
+                  { $eq: ['$transactionType', SaleTransactionType.Refund] },
+                  {
+                    $cond: [
+                      { $gt: [{ $strLenCP: '$$source' }, 0] },
+                      '$$source',
+                      '$$fallback',
+                    ],
+                  },
+                  '$$fallback',
+                ],
+              },
+            },
+          },
+        },
+      },
+    ];
+
     if (q) {
-      filter.$or = [
-        { posId: { $regex: q, $options: 'i' } },
-        { email: { $regex: q, $options: 'i' } },
-        { 'cashier.name': { $regex: q, $options: 'i' } },
-        { 'cashier.email': { $regex: q, $options: 'i' } },
-        { 'customer.name': { $regex: q, $options: 'i' } },
-        { 'customer.email': { $regex: q, $options: 'i' } },
-      ];
+      pipeline.push({
+        $match: {
+          $or: [
+            { posId: { $regex: q, $options: 'i' } },
+            { receiptNumber: { $regex: q, $options: 'i' } },
+            { __sourceReceiptNumber: { $regex: q, $options: 'i' } },
+            { email: { $regex: q, $options: 'i' } },
+            { 'cashier.name': { $regex: q, $options: 'i' } },
+            { 'cashier.email': { $regex: q, $options: 'i' } },
+            { 'customer.name': { $regex: q, $options: 'i' } },
+            { 'customer.email': { $regex: q, $options: 'i' } },
+          ],
+        },
+      });
     }
 
-    const [docs, total] = await Promise.all([
-      this.saleModel
-        .find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .select({
-          _id: 1,
-          posId: 1,
-          receiptNumber: 1,
-          createdAt: 1,
-          currency: 1,
-          cashier: 1,
-          customer: 1,
-          email: 1,
-          totals: 1,
-        })
-        .exec(),
-      this.saleModel.countDocuments(filter).exec(),
-    ]);
+    const result = await this.saleModel
+      .aggregate([
+        ...pipeline,
+        {
+          $facet: {
+            data: [
+              { $sort: { createdAt: -1 } },
+              { $skip: skip },
+              { $limit: limit },
+              {
+                $project: {
+                  _id: 1,
+                  createdAt: 1,
+                  currency: 1,
+                  transactionType: 1,
+                  cashier: 1,
+                  customer: 1,
+                  email: 1,
+                  totals: 1,
+                  receiptNo: '$__resolvedReceiptNo',
+                },
+              },
+            ],
+            total: [{ $count: 'count' }],
+            sales: [
+              { $match: { transactionType: SaleTransactionType.Sale } },
+              { $count: 'count' },
+            ],
+            refunds: [
+              { $match: { transactionType: SaleTransactionType.Refund } },
+              { $count: 'count' },
+            ],
+          },
+        },
+      ])
+      .exec();
+
+    const facet = result?.[0] ?? {
+      data: [],
+      total: [],
+      sales: [],
+      refunds: [],
+    };
+    const docs = facet.data ?? [];
+    const total = Number(facet.total?.[0]?.count ?? 0);
+    const salesTotal = Number(facet.sales?.[0]?.count ?? 0);
+    const refundsTotal = Number(facet.refunds?.[0]?.count ?? 0);
 
     const data = docs.map((s: any) => {
-      const totalNum =
+      const totalRaw =
         typeof s?.totals?.amountDue === 'number'
           ? s.totals.amountDue
           : typeof s?.totals?.amountPaid === 'number'
             ? s.totals.amountPaid
             : 0;
+      const totalNum =
+        typeof totalRaw === 'number' ? Math.abs(totalRaw) : Math.abs(0);
 
       const customerName =
         (typeof s?.customer?.name === 'string' && s.customer.name.trim()) ||
@@ -1339,11 +1784,14 @@ export class SalesService {
 
       return {
         id: String(s?._id ?? ''),
-        receiptNo: String(s?.receiptNumber ?? s?.posId ?? ''),
+        receiptNo: String(s?.receiptNo ?? ''),
         date: new Date(s?.createdAt).toISOString(),
         employee: employeeName,
         customer: customerName,
-        type: 'Sale' as const,
+        type:
+          s?.transactionType === SaleTransactionType.Refund
+            ? ('Refund' as const)
+            : ('Sale' as const),
         total: totalNum,
         currency: String(s?.currency ?? 'PHP'),
       };
@@ -1358,7 +1806,11 @@ export class SalesService {
       hasPrev: page > 1,
       from: from.toISOString(),
       to: to.toISOString(),
-      summary: { allReceipts: total, sales: total, refunds: 0 },
+      summary: {
+        allReceipts: total,
+        sales: salesTotal,
+        refunds: refundsTotal,
+      },
     };
   }
 }

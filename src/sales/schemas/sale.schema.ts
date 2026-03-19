@@ -6,6 +6,11 @@ export type SaleDocument = HydratedDocument<Sale>;
 
 const Mixed = MongooseSchema.Types.Mixed;
 
+export enum SaleTransactionType {
+  Sale = 'sale',
+  Refund = 'refund',
+}
+
 @Schema({ _id: false })
 export class SalePayment {
   @Prop({ trim: true })
@@ -53,6 +58,15 @@ export class Sale {
   @Prop({ required: true, trim: true, index: true })
   storeId!: string;
 
+  @Prop({
+    required: true,
+    trim: true,
+    enum: Object.values(SaleTransactionType),
+    default: SaleTransactionType.Sale,
+    index: true,
+  })
+  transactionType!: SaleTransactionType;
+
   // Client-generated sale id (UUID) from POS app.
   @Prop({ required: true, trim: true, index: true })
   posId!: string;
@@ -66,6 +80,18 @@ export class Sale {
 
   @Prop({ trim: true, index: true })
   customerId?: string;
+
+  @Prop({ trim: true })
+  sourceSaleId?: string;
+
+  @Prop({ trim: true, index: true })
+  refundSaleId?: string;
+
+  @Prop()
+  refundedAt?: Date;
+
+  @Prop({ trim: true })
+  refundReason?: string;
 
   // Optional email address for receipts / customer contact.
   @Prop({ trim: true, lowercase: true, index: true })
@@ -94,8 +120,13 @@ export const SaleSchema = SchemaFactory.createForClass(Sale);
 SaleSchema.plugin(createdUpdatedByPlugin);
 
 SaleSchema.index({ storeId: 1, createdAt: -1 });
+SaleSchema.index({ storeId: 1, transactionType: 1, createdAt: -1 });
 SaleSchema.index({ storeId: 1, posId: 1 }, { unique: true });
-SaleSchema.index({ storeId: 1, receiptNumber: 1 }, { unique: true, sparse: true });
+SaleSchema.index(
+  { storeId: 1, receiptNumber: 1 },
+  { unique: true, sparse: true },
+);
+SaleSchema.index({ sourceSaleId: 1 }, { unique: true, sparse: true });
 
 SaleSchema.set('toJSON', {
   transform: (_doc: any, ret: any) => {

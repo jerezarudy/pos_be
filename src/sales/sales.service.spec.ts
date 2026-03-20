@@ -219,9 +219,9 @@ describe('SalesService', () => {
               receipts: 4,
               cashSales: 5000,
               cashRefunds: 500,
-              cashReceived: 5500,
+              cashReceived: 5250,
               changeGiven: 250,
-              cashCollected: 5250,
+              cashCollected: 4500,
               netCash: 4500,
             },
           ],
@@ -254,9 +254,9 @@ describe('SalesService', () => {
         sales: 5000,
         refunds: 500,
         net: 4500,
-        cashReceived: 5500,
+        cashReceived: 5250,
         changeGiven: 250,
-        cashCollected: 5250,
+        cashCollected: 4500,
       },
     });
 
@@ -279,5 +279,22 @@ describe('SalesService', () => {
         }),
       ]),
     );
+
+    const pipeline = saleModel.aggregate.mock.calls[0][0];
+    const facetStage = pipeline.find((stage: any) => stage.$facet);
+    const projectStage = facetStage.$facet.summary.find(
+      (stage: any) => stage.$project,
+    );
+    const refundAdjustedCashFormula = {
+      $subtract: [
+        { $subtract: ['$cashReceived', '$changeGiven'] },
+        '$cashRefunds',
+      ],
+    };
+
+    expect(projectStage.$project.cashCollected).toEqual(
+      refundAdjustedCashFormula,
+    );
+    expect(projectStage.$project.netCash).toEqual(refundAdjustedCashFormula);
   });
 });

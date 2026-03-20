@@ -2001,9 +2001,17 @@ export class SalesService {
                 cashReceived: 1,
                 changeGiven: 1,
                 cashCollected: {
-                  $subtract: ['$cashReceived', '$changeGiven'],
+                  $subtract: [
+                    { $subtract: ['$cashReceived', '$changeGiven'] },
+                    '$cashRefunds',
+                  ],
                 },
-                netCash: { $subtract: ['$cashSales', '$cashRefunds'] },
+                netCash: {
+                  $subtract: [
+                    { $subtract: ['$cashReceived', '$changeGiven'] },
+                    '$cashRefunds',
+                  ],
+                },
               },
             },
           ],

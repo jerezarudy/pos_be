@@ -13,6 +13,7 @@ describe('SalesController', () => {
     reportByEmployee: jest.fn(),
     reportByPaymentType: jest.fn(),
     reportReceipts: jest.fn(),
+    reportEndOfDayCash: jest.fn(),
     findOne: jest.fn(),
     update: jest.fn(),
   };
@@ -68,6 +69,23 @@ describe('SalesController', () => {
 
     expect(salesService.findAll).toHaveBeenCalledWith(
       { ...query, type: 'refund' },
+      'store-1',
+    );
+  });
+
+  it('delegates end of day cash reports using the request store scope', () => {
+    const req = {
+      user: {
+        storeId: 'store-1',
+        role: 'cashier',
+      },
+    };
+    const query = { startDate: '2026-03-19', endDate: '2026-03-19' };
+
+    controller.reportEndOfDayCash(req, query);
+
+    expect(salesService.reportEndOfDayCash).toHaveBeenCalledWith(
+      query,
       'store-1',
     );
   });

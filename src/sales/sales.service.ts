@@ -12,6 +12,7 @@ import { ItemsService } from '../items/items.service';
 import { UsersService } from '../users/users.service';
 import { PaginationResult, parsePagination } from '../common/pagination';
 import type {
+  EndOfDayCashReport,
   SalesByCategoryRow,
   SalesByEmployeeRow,
   SalesByItemRow,
@@ -231,8 +232,10 @@ export class SalesService {
   }
 
   private parseReportRange(query: any): { from: Date; to: Date } {
-    const from = this.parseDate(query?.from ?? query?.start);
-    const to = this.parseDate(query?.to ?? query?.end, { endOfDay: true });
+    const from = this.parseDate(query?.from ?? query?.start ?? query?.startDate);
+    const to = this.parseDate(query?.to ?? query?.end ?? query?.endDate, {
+      endOfDay: true,
+    });
     if (from > to) throw new BadRequestException('from must be <= to');
     return { from, to };
   }
@@ -1810,6 +1813,257 @@ export class SalesService {
         allReceipts: total,
         sales: salesTotal,
         refunds: refundsTotal,
+      },
+    };
+  }
+
+  async reportEndOfDayCash(
+    query: any,
+    storeId?: string,
+  ): Promise<EndOfDayCashReport> {
+    const { match, from, to } = this.baseMatchForReports(query, storeId);
+
+    const num = (input: any) => ({
+      $convert: { input, to: 'double', onError: 0, onNull: 0 },
+    });
+
+    const paymentTypeExpr = {
+      $toLower: {
+        $trim: { input: { $ifNull: ['$payment.type', ''] } },
+      },
+    };
+
+    const pipeline: any[] = [
+      { $match: match },
+      {
+        $facet: {
+          summary: [
+            {
+              $addFields: {
+                __amount: {
+                  $abs: num({
+                    $ifNull: [
+                      '$totals.amountDue',
+                      { $ifNull: ['$totals.amountPaid', 0] },
+                    ],
+                  }),
+                },
+                __discounts: {
+                  $sum: {
+                    $map: {
+                      input: { $ifNull: ['$discounts', []] },
+                      as: 'discount',
+                      in: num({
+                        $ifNull: [
+                          '$$discount.amount',
+                          {
+                            $ifNull: [
+                              '$$discount.value',
+                              {
+                                $ifNull: [
+                                  '$$discount.discount',
+                                  {
+                                    $ifNull: [
+                                      '$$discount.discountAmount',
+                                      0,
+                                    ],
+                                  },
+                                ],
+                              },
+                            ],
+                          },
+                        ],
+                      }),
+                    },
+                  },
+                },
+                __changeGiven: { $abs: num('$totals.change') },
+                __cashReceived: {
+                  $abs: num({
+                    $ifNull: [
+                      '$payment.cashReceived',
+                      { $ifNull: ['$totals.amountPaid', 0] },
+                    ],
+                  }),
+                },
+                __paymentType: paymentTypeExpr,
+                __isRefund: {
+                  $eq: ['$transactionType', SaleTransactionType.Refund],
+                },
+                __currency: {
+                  $trim: { input: { $ifNull: ['$currency', 'PHP'] } },
+                },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                currency: { $first: '$__currency' },
+                grossSales: {
+                  $sum: { $cond: ['$__isRefund', 0, '$__amount'] },
+                },
+                refundAmount: {
+                  $sum: { $cond: ['$__isRefund', '$__amount', 0] },
+                },
+                discounts: {
+                  $sum: { $cond: ['$__isRefund', 0, '$__discounts'] },
+                },
+                salesTransactions: {
+                  $sum: { $cond: ['$__isRefund', 0, 1] },
+                },
+                refundTransactions: {
+                  $sum: { $cond: ['$__isRefund', 1, 0] },
+                },
+                cashSales: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $eq: ['$__paymentType', 'cash'] },
+                          { $eq: ['$__isRefund', false] },
+                        ],
+                      },
+                      '$__amount',
+                      0,
+                    ],
+                  },
+                },
+                cashRefunds: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $eq: ['$__paymentType', 'cash'] },
+                          { $eq: ['$__isRefund', true] },
+                        ],
+                      },
+                      '$__amount',
+                      0,
+                    ],
+                  },
+                },
+                cashReceived: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $eq: ['$__paymentType', 'cash'] },
+                          { $eq: ['$__isRefund', false] },
+                        ],
+                      },
+                      '$__cashReceived',
+                      0,
+                    ],
+                  },
+                },
+                changeGiven: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $eq: ['$__paymentType', 'cash'] },
+                          { $eq: ['$__isRefund', false] },
+                        ],
+                      },
+                      '$__changeGiven',
+                      0,
+                    ],
+                  },
+                },
+              },
+            },
+            {
+              $project: {
+                _id: 0,
+                currency: {
+                  $cond: [
+                    { $gt: [{ $strLenCP: { $ifNull: ['$currency', ''] } }, 0] },
+                    '$currency',
+                    'PHP',
+                  ],
+                },
+                grossSales: 1,
+                refundAmount: 1,
+                discounts: 1,
+                salesTransactions: 1,
+                refundTransactions: 1,
+                receipts: {
+                  $add: ['$salesTransactions', '$refundTransactions'],
+                },
+                netSales: {
+                  $subtract: [
+                    { $subtract: ['$grossSales', '$discounts'] },
+                    '$refundAmount',
+                  ],
+                },
+                cashSales: 1,
+                cashRefunds: 1,
+                cashReceived: 1,
+                changeGiven: 1,
+                cashCollected: {
+                  $subtract: ['$cashReceived', '$changeGiven'],
+                },
+                netCash: { $subtract: ['$cashSales', '$cashRefunds'] },
+              },
+            },
+          ],
+          costOfGoods: [
+            ...this.itemLineStages(),
+            {
+              $group: {
+                _id: null,
+                costOfGoods: { $sum: '$__signedCostOfGoods' },
+              },
+            },
+          ],
+        },
+      },
+    ];
+
+    const result = await this.saleModel
+      .aggregate(pipeline)
+      .exec();
+
+    const facet = result?.[0] ?? { summary: [], costOfGoods: [] };
+    const summary = facet.summary?.[0] ?? {};
+
+    const grossSales = Number(summary?.grossSales ?? 0);
+    const refundAmount = Number(summary?.refundAmount ?? 0);
+    const discounts = Number(summary?.discounts ?? 0);
+    const netSales = Number(summary?.netSales ?? 0);
+    const costOfGoods = Number(facet.costOfGoods?.[0]?.costOfGoods ?? 0);
+    const salesTransactions = Number(summary?.salesTransactions ?? 0);
+    const refundTransactions = Number(summary?.refundTransactions ?? 0);
+    const receipts = Number(summary?.receipts ?? 0);
+    const cashSales = Number(summary?.cashSales ?? 0);
+    const cashRefunds = Number(summary?.cashRefunds ?? 0);
+    const cashReceived = Number(summary?.cashReceived ?? 0);
+    const changeGiven = Number(summary?.changeGiven ?? 0);
+    const cashCollected = Number(summary?.cashCollected ?? 0);
+    const netCash = Number(summary?.netCash ?? 0);
+
+    return {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      currency: String(summary?.currency ?? 'PHP'),
+      summary: {
+        grossSales,
+        netSales,
+        discounts,
+        refundAmount,
+        grossProfit: netSales - costOfGoods,
+        costOfGoods,
+        salesTransactions,
+        refundTransactions,
+        receipts,
+      },
+      cash: {
+        sales: cashSales,
+        refunds: cashRefunds,
+        net: netCash,
+        cashReceived,
+        changeGiven,
+        cashCollected,
       },
     };
   }

@@ -202,4 +202,82 @@ describe('SalesService', () => {
       sourceSaleId: 'sale-1',
     });
   });
+
+  it('builds an end of day cash summary from sales and refunds', async () => {
+    saleModel.aggregate.mockReturnValue({
+      exec: jest.fn().mockResolvedValue([
+        {
+          summary: [
+            {
+              currency: 'PHP',
+              grossSales: 7240,
+              refundAmount: 500,
+              discounts: 240,
+              netSales: 6500,
+              salesTransactions: 3,
+              refundTransactions: 1,
+              receipts: 4,
+              cashSales: 5000,
+              cashRefunds: 500,
+              cashReceived: 5500,
+              changeGiven: 250,
+              cashCollected: 5250,
+              netCash: 4500,
+            },
+          ],
+          costOfGoods: [{ costOfGoods: 3425 }],
+        },
+      ]),
+    });
+
+    const result = await service.reportEndOfDayCash(
+      { startDate: '2026-03-19', endDate: '2026-03-19' },
+      'store-1',
+    );
+
+    expect(result).toEqual({
+      from: '2026-03-19T00:00:00.000Z',
+      to: '2026-03-19T23:59:59.999Z',
+      currency: 'PHP',
+      summary: {
+        grossSales: 7240,
+        netSales: 6500,
+        discounts: 240,
+        refundAmount: 500,
+        grossProfit: 3075,
+        costOfGoods: 3425,
+        salesTransactions: 3,
+        refundTransactions: 1,
+        receipts: 4,
+      },
+      cash: {
+        sales: 5000,
+        refunds: 500,
+        net: 4500,
+        cashReceived: 5500,
+        changeGiven: 250,
+        cashCollected: 5250,
+      },
+    });
+
+    expect(saleModel.aggregate).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          $match: expect.objectContaining({
+            storeId: 'store-1',
+            createdAt: {
+              $gte: new Date('2026-03-19T00:00:00.000Z'),
+              $lte: new Date('2026-03-19T23:59:59.999Z'),
+            },
+          }),
+        }),
+        expect.objectContaining({
+          $facet: expect.objectContaining({
+            summary: expect.any(Array),
+            costOfGoods: expect.any(Array),
+          }),
+        }),
+      ]),
+    );
+  });
 });

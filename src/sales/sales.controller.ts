@@ -146,6 +146,12 @@ export class SalesController {
     return this.salesService.reportReceipts(query, storeId);
   }
 
+  @Get('reports/end-of-day-cash')
+  reportEndOfDayCash(@Req() req: any, @Query() query: any) {
+    const storeId = resolveStoreIdForRequest(query, req?.user);
+    return this.salesService.reportEndOfDayCash(query, storeId);
+  }
+
   @Get(':id')
   findOne(@Req() req: any, @Query() query: any, @Param('id') id: string) {
     const storeId = resolveStoreIdForRequest(query, req?.user);

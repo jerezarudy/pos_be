@@ -61,3 +61,32 @@ export type SalesItemSeries = {
   itemName: string;
   points: SalesSeriesPoint[];
 };
+
+export type EndOfDayCashSummary = {
+  grossSales: number;
+  netSales: number;
+  discounts: number;
+  refundAmount: number;
+  grossProfit: number;
+  costOfGoods: number;
+  salesTransactions: number;
+  refundTransactions: number;
+  receipts: number;
+};
+
+export type EndOfDayCashCashBreakdown = {
+  sales: number;
+  refunds: number;
+  net: number;
+  cashReceived: number;
+  changeGiven: number;
+  cashCollected: number;
+};
+
+export type EndOfDayCashReport = {
+  from: string;
+  to: string;
+  currency: string;
+  summary: EndOfDayCashSummary;
+  cash: EndOfDayCashCashBreakdown;
+};

@@ -13,6 +13,7 @@ import {
   CategoryDocument,
 } from '../categories/schemas/category.schema';
 import { CreateItemDto } from './dto/create-item.dto';
+import { ItemImagesCloudinaryService } from './item-images-cloudinary.service';
 import { UpdateItemStockDto } from './dto/update-item-stock.dto';
 import { UpdateItemDto } from './dto/update-item.dto';
 import { Item, ItemDocument } from './schemas/item.schema';
@@ -24,6 +25,7 @@ export class ItemsService {
     private readonly itemModel: Model<ItemDocument>,
     @InjectModel(Category.name)
     private readonly categoryModel: Model<CategoryDocument>,
+    private readonly itemImagesCloudinaryService: ItemImagesCloudinaryService,
   ) {}
 
   private assertStoreId(storeId?: string) {
@@ -118,6 +120,11 @@ export class ItemsService {
     if (normalized.imageUrl !== undefined) {
       normalized.imageUrl = this.normalizeOptionalText(normalized.imageUrl);
     }
+    if (normalized.imagePublicId !== undefined) {
+      normalized.imagePublicId = this.normalizeOptionalText(
+        normalized.imagePublicId,
+      );
+    }
     if (normalized.categoryId !== undefined) {
       normalized.categoryId = this.normalizeOptionalText(normalized.categoryId);
     }
@@ -143,16 +150,26 @@ export class ItemsService {
     return normalized as T;
   }
 
-  private isManagedItemImage(imageUrl?: unknown) {
+  private isManagedLocalItemImage(imageUrl?: unknown) {
     const normalized = this.normalizeOptionalText(imageUrl);
     return normalized?.startsWith('/uploads/items/') ?? false;
   }
 
-  private async deleteManagedItemImage(imageUrl?: unknown) {
-    const normalized = this.normalizeOptionalText(imageUrl);
-    if (!normalized || !this.isManagedItemImage(normalized)) return;
+  private async deleteManagedItemImage(
+    imageUrl?: unknown,
+    imagePublicId?: unknown,
+  ) {
+    const normalizedPublicId = this.normalizeOptionalText(imagePublicId);
+    if (normalizedPublicId) {
+      await this.itemImagesCloudinaryService.deleteItemImage(
+        normalizedPublicId,
+      );
+    }
 
-    const relativePath = normalized.replace(/^\/+/, '').split('/').join('\\');
+    const normalizedUrl = this.normalizeOptionalText(imageUrl);
+    if (!normalizedUrl || !this.isManagedLocalItemImage(normalizedUrl)) return;
+
+    const relativePath = normalizedUrl.replace(/^\/+/, '').split('/').join('\\');
     const absolutePath = join(process.cwd(), relativePath);
 
     try {
@@ -246,6 +263,7 @@ export class ItemsService {
       inStock,
       category,
       imageUrl: dto.imageUrl,
+      imagePublicId: dto.imagePublicId,
     });
     return created;
   }
@@ -393,6 +411,17 @@ export class ItemsService {
 
     if (dto.imageUrl !== undefined) {
       update.imageUrl = dto.imageUrl;
+
+      if (dto.imagePublicId !== undefined) {
+        update.imagePublicId = dto.imagePublicId;
+      } else {
+        (update as any).$unset = {
+          ...(update as any).$unset,
+          imagePublicId: 1,
+        };
+      }
+    } else if (dto.imagePublicId !== undefined) {
+      update.imagePublicId = dto.imagePublicId;
     }
 
     const updated = await this.itemModel
@@ -401,11 +430,15 @@ export class ItemsService {
     if (!updated) throw new NotFoundException('Item not found');
 
     if (
-      dto.imageUrl !== undefined &&
-      existing.imageUrl &&
-      existing.imageUrl !== updated.imageUrl
+      (dto.imageUrl !== undefined || dto.imagePublicId !== undefined) &&
+      (existing.imageUrl || existing.imagePublicId) &&
+      (existing.imageUrl !== updated.imageUrl ||
+        existing.imagePublicId !== updated.imagePublicId)
     ) {
-      await this.deleteManagedItemImage(existing.imageUrl);
+      await this.deleteManagedItemImage(
+        existing.imageUrl,
+        existing.imagePublicId,
+      );
     }
 
     return updated;
@@ -441,7 +474,7 @@ export class ItemsService {
   async remove(id: string) {
     const deleted = await this.itemModel.findByIdAndDelete(id).exec();
     if (!deleted) throw new NotFoundException('Item not found');
-    await this.deleteManagedItemImage(deleted.imageUrl);
+    await this.deleteManagedItemImage(deleted.imageUrl, deleted.imagePublicId);
     return { deleted: true, id };
   }
 

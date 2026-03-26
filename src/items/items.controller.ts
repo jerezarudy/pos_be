@@ -7,68 +7,29 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
-import { existsSync, mkdirSync } from 'fs';
-import { extname, join } from 'path';
+import { memoryStorage } from 'multer';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CreateItemDto } from './dto/create-item.dto';
+import { ItemImagesCloudinaryService } from './item-images-cloudinary.service';
 import { UpdateItemStockDto } from './dto/update-item-stock.dto';
 import { UpdateItemDto } from './dto/update-item.dto';
 import { ItemsService } from './items.service';
 
-const itemImagesDir = join(process.cwd(), 'uploads', 'items');
-
-function ensureItemImagesDir() {
-  if (!existsSync(itemImagesDir)) {
-    mkdirSync(itemImagesDir, { recursive: true });
-  }
-}
-
-function normalizeImageExtension(file: {
+type UploadedItemImageFile = {
+  buffer?: Buffer;
   originalname?: string;
   mimetype?: string;
-}) {
-  const originalExtension = extname(file.originalname ?? '').toLowerCase();
-  if (originalExtension) return originalExtension;
-
-  switch (file.mimetype) {
-    case 'image/jpeg':
-      return '.jpg';
-    case 'image/png':
-      return '.png';
-    case 'image/webp':
-      return '.webp';
-    case 'image/gif':
-      return '.gif';
-    default:
-      return '';
-  }
-}
-
-function buildItemImageUrl(file?: { filename?: string }) {
-  const filename =
-    typeof file?.filename === 'string' ? file.filename.trim() : '';
-  return filename ? `/uploads/items/${filename}` : undefined;
-}
+};
 
 const itemImageUploadInterceptor = FileInterceptor('image', {
-  storage: diskStorage({
-    destination: (_req, _file, cb) => {
-      ensureItemImagesDir();
-      cb(null, itemImagesDir);
-    },
-    filename: (_req, file, cb) => {
-      const extension = normalizeImageExtension(file);
-      const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-      cb(null, `${uniqueSuffix}${extension}`);
-    },
-  }),
+  storage: memoryStorage(),
   fileFilter: (_req, file, cb) => {
     if (!file.mimetype?.startsWith('image/')) {
       cb(new BadRequestException('Only image uploads are allowed'), false);
@@ -83,7 +44,10 @@ const itemImageUploadInterceptor = FileInterceptor('image', {
 
 @Controller('items')
 export class ItemsController {
-  constructor(private readonly itemsService: ItemsService) {}
+  constructor(
+    private readonly itemsService: ItemsService,
+    private readonly itemImagesCloudinaryService: ItemImagesCloudinaryService,
+  ) {}
 
   @UseGuards(JwtAuthGuard)
   @Get('next-sku')
@@ -94,11 +58,22 @@ export class ItemsController {
   @UseGuards(JwtAuthGuard)
   @Post()
   @UseInterceptors(itemImageUploadInterceptor)
-  create(@Body() dto: CreateItemDto, @UploadedFile() file?: { filename?: string }) {
-    return this.itemsService.create({
-      ...dto,
-      ...(buildItemImageUrl(file) ? { imageUrl: buildItemImageUrl(file) } : {}),
-    });
+  async create(@Body() dto: CreateItemDto, @UploadedFile() file?: UploadedItemImageFile) {
+    const uploadedImage = file
+      ? await this.itemImagesCloudinaryService.uploadItemImage(file)
+      : undefined;
+
+    try {
+      return await this.itemsService.create({
+        ...dto,
+        ...(uploadedImage ?? {}),
+      });
+    } catch (error) {
+      await this.itemImagesCloudinaryService.deleteItemImage(
+        uploadedImage?.imagePublicId,
+      );
+      throw error;
+    }
   }
 
   @Get()
@@ -112,17 +87,29 @@ export class ItemsController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Put(':id')
   @Patch(':id')
   @UseInterceptors(itemImageUploadInterceptor)
-  update(
+  async update(
     @Param('id') id: string,
     @Body() dto: UpdateItemDto,
-    @UploadedFile() file?: { filename?: string },
+    @UploadedFile() file?: UploadedItemImageFile,
   ) {
-    return this.itemsService.update(id, {
-      ...dto,
-      ...(buildItemImageUrl(file) ? { imageUrl: buildItemImageUrl(file) } : {}),
-    });
+    const uploadedImage = file
+      ? await this.itemImagesCloudinaryService.uploadItemImage(file)
+      : undefined;
+
+    try {
+      return await this.itemsService.update(id, {
+        ...dto,
+        ...(uploadedImage ?? {}),
+      });
+    } catch (error) {
+      await this.itemImagesCloudinaryService.deleteItemImage(
+        uploadedImage?.imagePublicId,
+      );
+      throw error;
+    }
   }
 
   @UseGuards(JwtAuthGuard)

@@ -4,15 +4,24 @@ import { ItemsService } from './items.service';
 describe('ItemsService', () => {
   let service: ItemsService;
   let itemModel: any;
+  let itemImagesCloudinaryService: any;
 
   beforeEach(() => {
     itemModel = {
       create: jest.fn(),
       findById: jest.fn(),
       findByIdAndUpdate: jest.fn(),
+      findByIdAndDelete: jest.fn(),
+    };
+    itemImagesCloudinaryService = {
+      deleteItemImage: jest.fn(),
     };
 
-    service = new ItemsService(itemModel, {} as any);
+    service = new ItemsService(
+      itemModel,
+      { findById: jest.fn() } as any,
+      itemImagesCloudinaryService,
+    );
   });
 
   it('updates stock and enables tracking for an item', async () => {
@@ -67,6 +76,7 @@ describe('ItemsService', () => {
       trackStock: 'true' as any,
       inStock: '8' as any,
       imageUrl: '/uploads/items/cola.png',
+      imagePublicId: 'pos-rodmar/items/cola',
       category: JSON.stringify({ id: 'cat-1', name: 'Drinks' }) as any,
     });
 
@@ -80,9 +90,59 @@ describe('ItemsService', () => {
         trackStock: true,
         inStock: 8,
         imageUrl: '/uploads/items/cola.png',
+        imagePublicId: 'pos-rodmar/items/cola',
         category: { id: 'cat-1', name: 'Drinks' },
       }),
     );
     expect(result).toEqual({ _id: 'item-1' });
+  });
+
+  it('deletes the previous Cloudinary image when an item image is replaced', async () => {
+    itemModel.findById.mockReturnValue({
+      exec: jest.fn().mockResolvedValue({
+        _id: 'item-1',
+        trackStock: true,
+        inStock: 5,
+        imageUrl: 'https://res.cloudinary.com/demo/image/upload/old.png',
+        imagePublicId: 'pos-rodmar/items/old',
+      }),
+    });
+    itemModel.findByIdAndUpdate.mockReturnValue({
+      exec: jest.fn().mockResolvedValue({
+        _id: 'item-1',
+        trackStock: true,
+        inStock: 5,
+        imageUrl: 'https://res.cloudinary.com/demo/image/upload/new.png',
+        imagePublicId: 'pos-rodmar/items/new',
+      }),
+    });
+
+    await service.update('item-1', {
+      imageUrl: 'https://res.cloudinary.com/demo/image/upload/new.png',
+      imagePublicId: 'pos-rodmar/items/new',
+    });
+
+    expect(itemImagesCloudinaryService.deleteItemImage).toHaveBeenCalledWith(
+      'pos-rodmar/items/old',
+    );
+  });
+
+  it('deletes the Cloudinary image when an item is removed', async () => {
+    itemModel.findByIdAndDelete.mockReturnValue({
+      exec: jest.fn().mockResolvedValue({
+        _id: 'item-1',
+        imageUrl: 'https://res.cloudinary.com/demo/image/upload/cola.png',
+        imagePublicId: 'pos-rodmar/items/cola',
+      }),
+    });
+
+    await expect(service.remove('item-1')).resolves.toEqual({
+      deleted: true,
+      id: 'item-1',
+    });
+
+    expect(itemImagesCloudinaryService.deleteItemImage).toHaveBeenCalledWith(
+      'pos-rodmar/items/cola',
+    );
   });
 });

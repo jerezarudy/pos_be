@@ -8,6 +8,7 @@ export class UpdateItemDto {
   price?: number;
   description?: string;
   imageUrl?: string;
+  imagePublicId?: string;
   trackStock?: boolean;
   inStock?: number;
 }

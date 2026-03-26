@@ -9,6 +9,7 @@ export class CreateItemDto {
   cost?: number;
   description?: string;
   imageUrl?: string;
+  imagePublicId?: string;
   trackStock?: boolean;
   inStock?: number;
 }

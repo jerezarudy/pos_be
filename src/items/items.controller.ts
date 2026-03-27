@@ -87,13 +87,31 @@ export class ItemsController {
   }
 
   @UseGuards(JwtAuthGuard)
-  @Put(':id')
   @Patch(':id')
   @UseInterceptors(itemImageUploadInterceptor)
   async update(
     @Param('id') id: string,
     @Body() dto: UpdateItemDto,
     @UploadedFile() file?: UploadedItemImageFile,
+  ) {
+    return this.updateItemWithImage(id, dto, file);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Put(':id')
+  @UseInterceptors(itemImageUploadInterceptor)
+  async replace(
+    @Param('id') id: string,
+    @Body() dto: UpdateItemDto,
+    @UploadedFile() file?: UploadedItemImageFile,
+  ) {
+    return this.updateItemWithImage(id, dto, file);
+  }
+
+  private async updateItemWithImage(
+    id: string,
+    dto: UpdateItemDto,
+    file?: UploadedItemImageFile,
   ) {
     const uploadedImage = file
       ? await this.itemImagesCloudinaryService.uploadItemImage(file)

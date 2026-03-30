@@ -213,7 +213,7 @@ describe('SalesService', () => {
               grossSales: 7240,
               refundAmount: 500,
               discounts: 240,
-              netSales: 6500,
+              netSales: 6740,
               salesTransactions: 3,
               refundTransactions: 1,
               receipts: 4,
@@ -241,10 +241,10 @@ describe('SalesService', () => {
       currency: 'PHP',
       summary: {
         grossSales: 7240,
-        netSales: 6500,
+        netSales: 6740,
         discounts: 240,
         refundAmount: 500,
-        grossProfit: 3075,
+        grossProfit: 3315,
         costOfGoods: 3425,
         salesTransactions: 3,
         refundTransactions: 1,
@@ -291,10 +291,14 @@ describe('SalesService', () => {
         '$cashRefunds',
       ],
     };
+    const netSalesFormula = {
+      $subtract: ['$grossSales', '$refundAmount'],
+    };
 
     expect(projectStage.$project.cashCollected).toEqual(
       refundAdjustedCashFormula,
     );
     expect(projectStage.$project.netCash).toEqual(refundAdjustedCashFormula);
+    expect(projectStage.$project.netSales).toEqual(netSalesFormula);
   });
 });

@@ -1991,10 +1991,7 @@ export class SalesService {
                   $add: ['$salesTransactions', '$refundTransactions'],
                 },
                 netSales: {
-                  $subtract: [
-                    { $subtract: ['$grossSales', '$discounts'] },
-                    '$refundAmount',
-                  ],
+                  $subtract: ['$grossSales', '$refundAmount'],
                 },
                 cashSales: 1,
                 cashRefunds: 1,

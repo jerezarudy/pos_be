@@ -62,6 +62,18 @@ export type SalesItemSeries = {
   points: SalesSeriesPoint[];
 };
 
+export type ReceiptsReportRow = {
+  id: string;
+  receiptNo: string;
+  date: string;
+  employee?: string;
+  customer?: string;
+  type: 'Sale' | 'Refund';
+  total: number;
+  currency: string;
+  items: any[];
+};
+
 export type EndOfDayCashSummary = {
   grossSales: number;
   netSales: number;

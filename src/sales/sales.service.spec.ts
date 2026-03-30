@@ -113,6 +113,7 @@ describe('SalesService', () => {
               transactionType: SaleTransactionType.Refund,
               cashier: { name: 'Test Cashier' },
               customer: { name: 'Buyer' },
+              items: [{ itemId: 'item-1', qty: 2, name: 'Black Magic' }],
               totals: { amountDue: 1000 },
               receiptNo: '20260319000001',
             },
@@ -135,6 +136,7 @@ describe('SalesService', () => {
       type: 'Refund',
       total: 1000,
       currency: 'PHP',
+      items: [{ itemId: 'item-1', qty: 2, name: 'Black Magic' }],
     });
 
     expect(saleModel.aggregate).toHaveBeenCalledWith(

@@ -13,6 +13,7 @@ import { UsersService } from '../users/users.service';
 import { PaginationResult, parsePagination } from '../common/pagination';
 import type {
   EndOfDayCashReport,
+  ReceiptsReportRow,
   SalesByCategoryRow,
   SalesByEmployeeRow,
   SalesByItemRow,
@@ -1587,16 +1588,7 @@ export class SalesService {
     query: any,
     storeId?: string,
   ): Promise<
-    PaginationResult<{
-      id: string;
-      receiptNo: string;
-      date: string;
-      employee?: string;
-      customer?: string;
-      type: 'Sale' | 'Refund';
-      total: number;
-      currency: string;
-    }> & {
+    PaginationResult<ReceiptsReportRow> & {
       from: string;
       to: string;
       summary: { allReceipts: number; sales: number; refunds: number };
@@ -1734,6 +1726,7 @@ export class SalesService {
                   cashier: 1,
                   customer: 1,
                   email: 1,
+                  items: 1,
                   totals: 1,
                   receiptNo: '$__resolvedReceiptNo',
                 },
@@ -1797,6 +1790,7 @@ export class SalesService {
             : ('Sale' as const),
         total: totalNum,
         currency: String(s?.currency ?? 'PHP'),
+        items: Array.isArray(s?.items) ? s.items : [],
       };
     });
 

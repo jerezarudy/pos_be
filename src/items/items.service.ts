@@ -5,9 +5,10 @@ import {
 } from '@nestjs/common';
 import { unlink } from 'fs/promises';
 import { InjectModel } from '@nestjs/mongoose';
-import type { ClientSession, Model } from 'mongoose';
+import type { ClientSession, FilterQuery, Model, PipelineStage } from 'mongoose';
 import { join } from 'path';
 import { PaginationResult, parsePagination } from '../common/pagination';
+import { getRequestActor } from '../common/request-context';
 import {
   Category,
   CategoryDocument,
@@ -15,18 +16,49 @@ import {
 import { CreateItemDto } from './dto/create-item.dto';
 import { ItemImagesCloudinaryService } from './item-images-cloudinary.service';
 import { UpdateItemStockDto } from './dto/update-item-stock.dto';
+import { TransferItemDto } from './dto/transfer-item.dto';
 import { UpdateItemDto } from './dto/update-item.dto';
 import { Item, ItemDocument } from './schemas/item.schema';
+import {
+  ItemTransfer,
+  ItemTransferDocument,
+} from './schemas/item-transfer.schema';
 
 @Injectable()
 export class ItemsService {
+  private supportsTransactionsCache: boolean | undefined;
+
   constructor(
     @InjectModel(Item.name)
     private readonly itemModel: Model<ItemDocument>,
     @InjectModel(Category.name)
     private readonly categoryModel: Model<CategoryDocument>,
+    @InjectModel(ItemTransfer.name)
+    private readonly itemTransferModel: Model<ItemTransferDocument>,
     private readonly itemImagesCloudinaryService: ItemImagesCloudinaryService,
   ) {}
+
+  private async supportsTransactions() {
+    if (this.supportsTransactionsCache !== undefined) {
+      return this.supportsTransactionsCache;
+    }
+
+    try {
+      const nativeDb: any = (this.itemModel.db as any)?.db;
+      const cmd = async (command: Record<string, unknown>) =>
+        nativeDb?.admin?.().command(command);
+
+      const hello: any = await cmd({ hello: 1 });
+      const res = hello ?? (await cmd({ isMaster: 1 }));
+
+      this.supportsTransactionsCache =
+        Boolean(res?.setName) || res?.msg === 'isdbgrid';
+    } catch {
+      this.supportsTransactionsCache = false;
+    }
+
+    return this.supportsTransactionsCache;
+  }
 
   private assertStoreId(storeId?: string) {
     const normalized = storeId?.trim();
@@ -60,6 +92,14 @@ export class ItemsService {
       throw new BadRequestException(`${field} must be a non-negative number`);
     }
     return num;
+  }
+
+  private parsePositiveInteger(value: unknown, field: string) {
+    const num = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(num) || num <= 0) {
+      throw new BadRequestException(`${field} must be a positive number`);
+    }
+    return Math.floor(num);
   }
 
   private parseOptionalBoolean(value: unknown) {
@@ -469,6 +509,357 @@ export class ItemsService {
 
     if (!updated) throw new NotFoundException('Item not found');
     return updated;
+  }
+
+  async transfer(id: string, dto: TransferItemDto) {
+    const transfer = async (session?: ClientSession) => {
+      const amount = this.parsePositiveInteger(dto?.amount, 'amount');
+      const toStoreId = this.assertStoreId(dto?.toStoreId);
+
+      const sourceQuery = this.itemModel.findById(id);
+      if (session) sourceQuery.session(session);
+      const source = await sourceQuery.exec();
+      if (!source) throw new NotFoundException('Item not found');
+
+      const fromStoreId = this.assertStoreId(source.storeId);
+      if (fromStoreId === toStoreId) {
+        throw new BadRequestException(
+          'toStoreId must be different from the source item storeId',
+        );
+      }
+
+      if (!source.trackStock) {
+        throw new BadRequestException('Source item does not track stock');
+      }
+
+      const sourceBeforeStock =
+        typeof source.inStock === 'number' ? source.inStock : 0;
+      if (sourceBeforeStock < amount) {
+        throw new BadRequestException('Insufficient stock for transfer');
+      }
+
+      const destinationFilter = this.buildDestinationItemFilter(source, toStoreId);
+      const destinationQuery = this.itemModel.findOne(destinationFilter);
+      if (session) destinationQuery.session(session);
+      const destination = await destinationQuery.exec();
+
+      const sourceAfterStock = sourceBeforeStock - amount;
+      const sourceItemDeleted = sourceAfterStock === 0;
+      const destinationBeforeStock = destination
+        ? typeof destination.inStock === 'number'
+          ? destination.inStock
+          : 0
+        : undefined;
+
+      let destinationItem: ItemDocument;
+      let destinationItemCreated = false;
+
+      if (destination) {
+        const updatedDestination = await this.itemModel
+          .findByIdAndUpdate(
+            destination._id,
+            {
+              trackStock: true,
+              $inc: { inStock: amount },
+            },
+            { new: true, session },
+          )
+          .exec();
+        if (!updatedDestination) {
+          throw new NotFoundException('Destination item not found');
+        }
+        destinationItem = updatedDestination;
+      } else {
+        const createdDestination = await this.itemModel.create(
+          [
+            {
+              storeId: toStoreId,
+              name: source.name,
+              category: source.category,
+              sku: source.sku,
+              barcode: source.barcode,
+              price: source.price,
+              cost: source.cost,
+              description: source.description,
+              imageUrl: source.imageUrl,
+              trackStock: true,
+              inStock: amount,
+            },
+          ],
+          { session },
+        );
+        destinationItem = createdDestination[0];
+        destinationItemCreated = true;
+      }
+
+      if (sourceItemDeleted) {
+        await this.itemModel.findByIdAndDelete(source._id, { session }).exec();
+      } else {
+        const updatedSource = await this.itemModel
+          .findByIdAndUpdate(
+            source._id,
+            { inStock: sourceAfterStock },
+            { new: true, session },
+          )
+          .exec();
+        if (!updatedSource) throw new NotFoundException('Item not found');
+      }
+
+      const destinationAfterStock =
+        typeof destinationItem.inStock === 'number'
+          ? destinationItem.inStock
+          : (destinationBeforeStock ?? 0) + amount;
+
+      const createdTransfer = await this.itemTransferModel.create(
+        [
+          {
+            fromStoreId,
+            toStoreId,
+            sourceItemId: String(source._id),
+            destinationItemId: String(destinationItem._id),
+            itemName: source.name,
+            sku: source.sku,
+            barcode: source.barcode,
+            amount,
+            sourceBeforeStock,
+            sourceAfterStock,
+            destinationBeforeStock,
+            destinationAfterStock,
+            destinationItemCreated,
+            sourceItemDeleted,
+            transferredBy: getRequestActor(),
+          },
+        ],
+        { session },
+      );
+
+      return {
+        transfer: createdTransfer[0],
+        sourceItem: sourceItemDeleted
+          ? null
+          : {
+              ...source.toObject(),
+              inStock: sourceAfterStock,
+            },
+        destinationItem,
+      };
+    };
+
+    if (!(await this.supportsTransactions())) {
+      return transfer();
+    }
+
+    const session: ClientSession = await this.itemModel.db.startSession();
+    try {
+      let result:
+        | {
+            transfer: ItemTransferDocument;
+            sourceItem: Record<string, unknown> | null;
+            destinationItem: ItemDocument;
+          }
+        | undefined;
+
+      await session.withTransaction(async () => {
+        result = await transfer(session);
+      });
+
+      if (!result) {
+        throw new BadRequestException('Failed to transfer item');
+      }
+
+      return result;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  async findTransfers(query?: any): Promise<PaginationResult<ItemTransfer>> {
+    return this.findTransferReports(query);
+  }
+
+  async findTransferReports(query?: any): Promise<PaginationResult<ItemTransfer>> {
+    const { page, limit, skip } = parsePagination(query, {
+      defaultLimit: 20,
+      maxLimit: 200,
+    });
+    const filters = this.buildTransferReportFilter(query);
+    const [result] = await this.itemTransferModel
+      .aggregate(this.buildTransferReportPipeline(filters, skip, limit))
+      .exec();
+    const data = (result?.data ?? []) as ItemTransfer[];
+    const total = Number(result?.total?.[0]?.count ?? 0);
+
+    return {
+      data,
+      page,
+      limit,
+      total,
+      hasNext: skip + data.length < total,
+      hasPrev: page > 1,
+    };
+  }
+
+  private buildTransferReportPipeline(
+    filters: FilterQuery<ItemTransferDocument>,
+    skip: number,
+    limit: number,
+  ): PipelineStage[] {
+    return [
+      { $match: filters },
+      { $sort: { createdAt: -1 } },
+      {
+        $facet: {
+          data: [
+            { $skip: skip },
+            { $limit: limit },
+            {
+              $addFields: {
+                fromStoreObjectId: this.stringObjectIdExpression('$fromStoreId'),
+                toStoreObjectId: this.stringObjectIdExpression('$toStoreId'),
+                transferredByObjectId:
+                  this.stringObjectIdExpression('$transferredBy'),
+              },
+            },
+            {
+              $lookup: {
+                from: 'stores',
+                localField: 'fromStoreObjectId',
+                foreignField: '_id',
+                as: 'fromStore',
+              },
+            },
+            {
+              $lookup: {
+                from: 'stores',
+                localField: 'toStoreObjectId',
+                foreignField: '_id',
+                as: 'toStore',
+              },
+            },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'transferredByObjectId',
+                foreignField: '_id',
+                as: 'user',
+              },
+            },
+            {
+              $addFields: {
+                fromStore: { $arrayElemAt: ['$fromStore', 0] },
+                toStore: { $arrayElemAt: ['$toStore', 0] },
+                user: { $arrayElemAt: ['$user', 0] },
+              },
+            },
+            {
+              $project: {
+                fromStoreObjectId: 0,
+                toStoreObjectId: 0,
+                transferredByObjectId: 0,
+                'fromStore.__v': 0,
+                'toStore.__v': 0,
+                'user.passwordHash': 0,
+                'user.pos_pin': 0,
+                'user.__v': 0,
+              },
+            },
+          ],
+          total: [{ $count: 'count' }],
+        },
+      },
+    ];
+  }
+
+  private stringObjectIdExpression(input: string) {
+    return {
+      $cond: [
+        {
+          $regexMatch: {
+            input,
+            regex: /^[a-f\d]{24}$/i,
+          },
+        },
+        { $toObjectId: input },
+        null,
+      ],
+    };
+  }
+
+  private buildDestinationItemFilter(source: ItemDocument, toStoreId: string) {
+    if (typeof source.sku === 'number') {
+      return { storeId: toStoreId, sku: source.sku };
+    }
+    const barcode = this.normalizeOptionalText(source.barcode);
+    if (barcode) {
+      return { storeId: toStoreId, barcode };
+    }
+    return { storeId: toStoreId, name: source.name };
+  }
+
+  private buildTransferReportFilter(query?: any): FilterQuery<ItemTransferDocument> {
+    const filters: FilterQuery<ItemTransferDocument>[] = [];
+
+    const fromStoreId = this.firstTrimmedString(
+      query?.fromStoreId,
+      query?.originStoreId,
+      query?.storeOrigin,
+    );
+    if (fromStoreId) filters.push({ fromStoreId });
+
+    const toStoreId = this.firstTrimmedString(
+      query?.toStoreId,
+      query?.destinationStoreId,
+      query?.storeDestination,
+    );
+    if (toStoreId) filters.push({ toStoreId });
+
+    const itemId =
+      typeof query?.itemId === 'string' ? query.itemId.trim() : '';
+    if (itemId) {
+      filters.push({
+        $or: [{ sourceItemId: itemId }, { destinationItemId: itemId }],
+      });
+    }
+
+    const from = this.parseDate(query?.from ?? query?.startDate);
+    const to = this.parseDate(query?.to ?? query?.endDate, true);
+    if (from || to) {
+      const createdAt: Record<string, Date> = {};
+      if (from) createdAt.$gte = from;
+      if (to) createdAt.$lte = to;
+      filters.push({ createdAt });
+    }
+
+    return filters.length === 0
+      ? {}
+      : filters.length === 1
+        ? filters[0]
+        : { $and: filters };
+  }
+
+  private firstTrimmedString(...values: unknown[]) {
+    for (const value of values) {
+      if (typeof value !== 'string') continue;
+      const trimmed = value.trim();
+      if (trimmed) return trimmed;
+    }
+    return '';
+  }
+
+  private parseDate(value: unknown, endOfDay = false): Date | undefined {
+    if (typeof value !== 'string') return undefined;
+    const raw = value.trim();
+    if (!raw) return undefined;
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      const parsed = new Date(
+        `${raw}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}Z`,
+      );
+      return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+    }
+
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
   }
 
   async remove(id: string) {

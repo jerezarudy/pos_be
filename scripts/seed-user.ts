@@ -11,8 +11,8 @@ async function seed() {
   try {
     const usersService = app.get(UsersService);
     const created = await usersService.create({
-      email: 'admin@email.com',
-      password: 'U3FDFug9JmW8cNY',
+      email: 'vl_admin@email.com',
+      password: 'vl_admin12345',
       name: 'Admin',
       role: UserRole.Admin,
     });

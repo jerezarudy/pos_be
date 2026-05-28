@@ -29,7 +29,7 @@ POS_Rodmar backend API built with [Nest](https://github.com/nestjs/nest).
 
 This project uses MongoDB Atlas via Mongoose.
 
-- Database name: `pos_db`
+- Database name: `pos_vl_db`
 - Connection string: set `MONGODB_URI` in `.env`
 
 ### Auth

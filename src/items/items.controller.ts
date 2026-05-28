@@ -18,6 +18,7 @@ import { memoryStorage } from 'multer';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CreateItemDto } from './dto/create-item.dto';
 import { ItemImagesCloudinaryService } from './item-images-cloudinary.service';
+import { TransferItemDto } from './dto/transfer-item.dto';
 import { UpdateItemStockDto } from './dto/update-item-stock.dto';
 import { UpdateItemDto } from './dto/update-item.dto';
 import { ItemsService } from './items.service';
@@ -81,6 +82,18 @@ export class ItemsController {
     return this.itemsService.findAll(query);
   }
 
+  @UseGuards(JwtAuthGuard)
+  @Get('reports/transfers')
+  findTransferReports(@Query() query: any) {
+    return this.itemsService.findTransferReports(query);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('transfers')
+  findTransfers(@Query() query: any) {
+    return this.itemsService.findTransfers(query);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.itemsService.findOne(id);
@@ -134,6 +147,12 @@ export class ItemsController {
   @Patch(':id/stock')
   updateStock(@Param('id') id: string, @Body() dto: UpdateItemStockDto) {
     return this.itemsService.updateStock(id, dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post(':id/transfer')
+  transfer(@Param('id') id: string, @Body() dto: TransferItemDto) {
+    return this.itemsService.transfer(id, dto);
   }
 
   @UseGuards(JwtAuthGuard)

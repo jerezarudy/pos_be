@@ -32,7 +32,7 @@ import { SalesModule } from './sales/sales.module';
         }
         return {
           uri,
-          dbName: 'pos_db',
+          dbName: 'pos_vl_db',
         };
       },
     }),

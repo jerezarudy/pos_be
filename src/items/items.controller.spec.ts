@@ -9,6 +9,8 @@ describe('ItemsController', () => {
     create: jest.fn(),
     update: jest.fn(),
     updateStock: jest.fn(),
+    transfer: jest.fn(),
+    findTransferReports: jest.fn(),
   };
   const itemImagesCloudinaryService = {
     uploadItemImage: jest.fn(),
@@ -44,6 +46,27 @@ describe('ItemsController', () => {
     controller.updateStock('item-1', dto);
 
     expect(itemsService.updateStock).toHaveBeenCalledWith('item-1', dto);
+  });
+
+  it('delegates item transfers to the service', () => {
+    const dto = { toStoreId: 'store-2', amount: 3 };
+
+    controller.transfer('item-1', dto);
+
+    expect(itemsService.transfer).toHaveBeenCalledWith('item-1', dto);
+  });
+
+  it('delegates transfer reports to the service', () => {
+    const query = {
+      from: '2026-05-01',
+      to: '2026-05-28',
+      fromStoreId: 'store-1',
+      toStoreId: 'store-2',
+    };
+
+    controller.findTransferReports(query);
+
+    expect(itemsService.findTransferReports).toHaveBeenCalledWith(query);
   });
 
   it('passes the uploaded Cloudinary image during create', async () => {

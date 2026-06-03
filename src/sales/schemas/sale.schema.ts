@@ -18,6 +18,9 @@ export class SalePayment {
 
   @Prop({ min: 0 })
   cashReceived?: number;
+
+  @Prop({ type: [Mixed] })
+  payments?: any[];
 }
 
 export const SalePaymentSchema = SchemaFactory.createForClass(SalePayment);

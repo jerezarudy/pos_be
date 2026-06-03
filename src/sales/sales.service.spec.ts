@@ -9,6 +9,7 @@ describe('SalesService', () => {
 
   beforeEach(() => {
     saleModel = {
+      exists: jest.fn(),
       findOne: jest.fn(),
       find: jest.fn(),
       create: jest.fn(),
@@ -33,6 +34,45 @@ describe('SalesService', () => {
       usersService,
       itemsService,
     );
+  });
+
+  it('preserves split payment details when creating a sale', async () => {
+    const splitPayment = {
+      type: 'split',
+      cashReceived: 700,
+      payments: [
+        { type: 'cash', amount: 500, cashReceived: 700 },
+        { type: 'gcash', amount: 300, referenceNo: 'GC-1' },
+      ],
+    };
+    const createdDoc = { _id: 'sale-1' };
+
+    jest.spyOn(service as any, 'supportsTransactions').mockResolvedValue(false);
+    jest
+      .spyOn(service as any, 'nextReceiptNumber')
+      .mockResolvedValue('20260319000001');
+
+    saleModel.exists.mockReturnValue({
+      exec: jest.fn().mockResolvedValue(null),
+    });
+    saleModel.create.mockResolvedValue(createdDoc);
+
+    const result = await service.create(
+      {
+        id: 'pos-1',
+        items: [{ itemId: 'item-1', qty: 1 }],
+        payment: splitPayment,
+        totals: { amountDue: 800, amountPaid: 1000, change: 200 },
+      },
+      { storeId: 'store-1', sub: 'user-1', email: 'cashier@example.com' },
+    );
+
+    expect(saleModel.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payment: splitPayment,
+      }),
+    );
+    expect(result).toBe(createdDoc);
   });
 
   it('creates refunds with non-negative totals', async () => {
@@ -111,6 +151,7 @@ describe('SalesService', () => {
               transactionType: SaleTransactionType.Refund,
               cashier: { name: 'Test Cashier' },
               customer: { name: 'Buyer' },
+              payment: { type: 'cash', cashReceived: 1000 },
               items: [{ itemId: 'item-1', qty: 2, name: 'Black Magic' }],
               totals: { amountDue: 1000 },
               receiptNo: '20260319000001',
@@ -132,6 +173,7 @@ describe('SalesService', () => {
       id: 'refund-1',
       receiptNo: '20260319000001',
       type: 'Refund',
+      paymentType: 'cash',
       total: 1000,
       currency: 'PHP',
       items: [{ itemId: 'item-1', qty: 2, name: 'Black Magic' }],
@@ -146,6 +188,55 @@ describe('SalesService', () => {
         }),
       ]),
     );
+  });
+
+  it('returns split payment details in receipt reports', async () => {
+    saleModel.aggregate.mockReturnValue({
+      exec: jest.fn().mockResolvedValue([
+        {
+          data: [
+            {
+              _id: 'sale-1',
+              createdAt: new Date('2026-06-03T05:20:24.724Z'),
+              currency: 'PHP',
+              transactionType: SaleTransactionType.Sale,
+              cashier: { name: 'Cashier 1' },
+              payment: {
+                type: 'split',
+                payments: [
+                  { type: 'cash', amount: 60, cashReceived: 100 },
+                  { type: 'gcash', amount: 40 },
+                ],
+              },
+              items: [{ itemId: 'item-1', qty: 1, name: 'Item 1' }],
+              totals: { amountDue: 100 },
+              receiptNo: '20260603000003',
+            },
+          ],
+          total: [{ count: 1 }],
+          sales: [{ count: 1 }],
+          refunds: [{ count: 0 }],
+        },
+      ]),
+    });
+
+    const result = await service.reportReceipts(
+      { from: '2026-06-03', to: '2026-06-03' },
+      'store-1',
+    );
+
+    expect(result.data[0]).toMatchObject({
+      id: 'sale-1',
+      receiptNo: '20260603000003',
+      type: 'Sale',
+      paymentType: 'split',
+      paymentDetails: [
+        { type: 'cash', amount: 60, cashReceived: 100 },
+        { type: 'gcash', amount: 40 },
+      ],
+      total: 100,
+      currency: 'PHP',
+    });
   });
 
   it('returns the source sale receipt number in refund lists', async () => {
@@ -205,6 +296,65 @@ describe('SalesService', () => {
     });
   });
 
+  it('expands split payments in payment type reports', async () => {
+    saleModel.aggregate.mockReturnValue({
+      exec: jest.fn().mockResolvedValue([
+        {
+          paymentType: 'cash',
+          paymentTransactions: 1,
+          paymentAmount: 500,
+          refundTransactions: 0,
+          refundAmount: 0,
+          netAmount: 500,
+        },
+        {
+          paymentType: 'gcash',
+          paymentTransactions: 1,
+          paymentAmount: 300,
+          refundTransactions: 0,
+          refundAmount: 0,
+          netAmount: 300,
+        },
+      ]),
+    });
+
+    const result = await service.reportByPaymentType(
+      { startDate: '2026-03-19', endDate: '2026-03-19' },
+      'store-1',
+    );
+
+    expect(result.data).toEqual([
+      {
+        paymentType: 'cash',
+        paymentTransactions: 1,
+        paymentAmount: 500,
+        refundTransactions: 0,
+        refundAmount: 0,
+        netAmount: 500,
+      },
+      {
+        paymentType: 'gcash',
+        paymentTransactions: 1,
+        paymentAmount: 300,
+        refundTransactions: 0,
+        refundAmount: 0,
+        netAmount: 300,
+      },
+    ]);
+
+    const pipeline = saleModel.aggregate.mock.calls[0][0];
+    expect(pipeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ $unwind: '$__paymentEntries' }),
+        expect.objectContaining({
+          $group: expect.objectContaining({
+            _id: '$__paymentEntries.type',
+          }),
+        }),
+      ]),
+    );
+  });
+
   it('builds an end of day cash summary from sales and refunds', async () => {
     saleModel.aggregate.mockReturnValue({
       exec: jest.fn().mockResolvedValue([
@@ -228,6 +378,27 @@ describe('SalesService', () => {
             },
           ],
           costOfGoods: [{ costOfGoods: 3425 }],
+          payments: [
+            {
+              type: 'cash',
+              sales: 5000,
+              refunds: 500,
+              net: 4500,
+              transactions: 2,
+              refundTransactions: 1,
+              cashReceived: 5250,
+              changeGiven: 250,
+              cashCollected: 4500,
+            },
+            {
+              type: 'gcash',
+              sales: 2240,
+              refunds: 0,
+              net: 2240,
+              transactions: 1,
+              refundTransactions: 0,
+            },
+          ],
         },
       ]),
     });
@@ -260,6 +431,27 @@ describe('SalesService', () => {
         changeGiven: 250,
         cashCollected: 4500,
       },
+      payments: [
+        {
+          type: 'cash',
+          sales: 5000,
+          refunds: 500,
+          net: 4500,
+          transactions: 2,
+          refundTransactions: 1,
+          cashReceived: 5250,
+          changeGiven: 250,
+          cashCollected: 4500,
+        },
+        {
+          type: 'gcash',
+          sales: 2240,
+          refunds: 0,
+          net: 2240,
+          transactions: 1,
+          refundTransactions: 0,
+        },
+      ],
     });
 
     expect(saleModel.aggregate).toHaveBeenCalledWith(
@@ -277,6 +469,7 @@ describe('SalesService', () => {
           $facet: expect.objectContaining({
             summary: expect.any(Array),
             costOfGoods: expect.any(Array),
+            payments: expect.any(Array),
           }),
         }),
       ]),

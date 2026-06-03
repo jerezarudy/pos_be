@@ -135,6 +135,12 @@ export type ReceiptsReportRow = {
   employee?: string;
   customer?: string;
   type: 'Sale' | 'Refund';
+  paymentType?: string;
+  paymentDetails?: {
+    type: string;
+    amount: number;
+    cashReceived?: number;
+  }[];
   total: number;
   currency: string;
   items: any[];
@@ -161,10 +167,23 @@ export type EndOfDayCashCashBreakdown = {
   cashCollected: number;
 };
 
+export type EndOfDayPaymentBreakdown = {
+  type: string;
+  sales: number;
+  refunds: number;
+  net: number;
+  transactions: number;
+  refundTransactions: number;
+  cashReceived?: number;
+  changeGiven?: number;
+  cashCollected?: number;
+};
+
 export type EndOfDayCashReport = {
   from: string;
   to: string;
   currency: string;
   summary: EndOfDayCashSummary;
   cash: EndOfDayCashCashBreakdown;
+  payments: EndOfDayPaymentBreakdown[];
 };

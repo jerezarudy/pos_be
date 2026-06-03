@@ -13,6 +13,7 @@ import { UsersService } from '../users/users.service';
 import { PaginationResult, parsePagination } from '../common/pagination';
 import type {
   EndOfDayCashReport,
+  EndOfDayPaymentBreakdown,
   MonthlySalesReport,
   MonthlySalesRow,
   ReceiptsReportRow,
@@ -1787,21 +1788,41 @@ export class SalesService {
       $convert: { input, to: 'double', onError: 0, onNull: 0 },
     });
 
+    const paymentType = (input: any, fallback = '') => ({
+      $toLower: {
+        $trim: { input: { $ifNull: [input, fallback] } },
+      },
+    });
+
+    const paymentPartAmount = (prefix: string) =>
+      num({
+        $ifNull: [
+          `${prefix}.amount`,
+          {
+            $ifNull: [
+              `${prefix}.amountPaid`,
+              {
+                $ifNull: [
+                  `${prefix}.value`,
+                  {
+                    $ifNull: [
+                      `${prefix}.total`,
+                      { $ifNull: [`${prefix}.cashReceived`, 0] },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+
     const rows = (await this.saleModel
       .aggregate([
         { $match: match },
         {
           $addFields: {
-            __paymentType: {
-              $let: {
-                vars: {
-                  t: { $trim: { input: { $ifNull: ['$payment.type', ''] } } },
-                },
-                in: {
-                  $cond: [{ $gt: [{ $strLenCP: '$$t' }, 0] }, '$$t', 'Unknown'],
-                },
-              },
-            },
+            __paymentType: paymentType('$payment.type'),
             __amount: {
               $abs: num({
                 $ifNull: [
@@ -1816,19 +1837,68 @@ export class SalesService {
           },
         },
         {
+          $addFields: {
+            __paymentEntries: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$__paymentType', 'split'] },
+                    { $isArray: '$payment.payments' },
+                    { $gt: [{ $size: '$payment.payments' }, 0] },
+                  ],
+                },
+                {
+                  $map: {
+                    input: '$payment.payments',
+                    as: 'paymentPart',
+                    in: {
+                      type: {
+                        $let: {
+                          vars: { t: paymentType('$$paymentPart.type') },
+                          in: {
+                            $cond: [
+                              { $gt: [{ $strLenCP: '$$t' }, 0] },
+                              '$$t',
+                              'unknown',
+                            ],
+                          },
+                        },
+                      },
+                      amount: { $abs: paymentPartAmount('$$paymentPart') },
+                    },
+                  },
+                },
+                [
+                  {
+                    type: {
+                      $cond: [
+                        { $gt: [{ $strLenCP: '$__paymentType' }, 0] },
+                        '$__paymentType',
+                        'unknown',
+                      ],
+                    },
+                    amount: '$__amount',
+                  },
+                ],
+              ],
+            },
+          },
+        },
+        { $unwind: '$__paymentEntries' },
+        {
           $group: {
-            _id: '$__paymentType',
+            _id: '$__paymentEntries.type',
             paymentTransactions: {
               $sum: { $cond: ['$__isRefund', 0, 1] },
             },
             paymentAmount: {
-              $sum: { $cond: ['$__isRefund', 0, '$__amount'] },
+              $sum: { $cond: ['$__isRefund', 0, '$__paymentEntries.amount'] },
             },
             refundTransactions: {
               $sum: { $cond: ['$__isRefund', 1, 0] },
             },
             refundAmount: {
-              $sum: { $cond: ['$__isRefund', '$__amount', 0] },
+              $sum: { $cond: ['$__isRefund', '$__paymentEntries.amount', 0] },
             },
           },
         },
@@ -2184,6 +2254,7 @@ export class SalesService {
                   cashier: 1,
                   customer: 1,
                   email: 1,
+                  payment: 1,
                   items: 1,
                   totals: 1,
                   receiptNo: '$__resolvedReceiptNo',
@@ -2236,6 +2307,50 @@ export class SalesService {
         (typeof s?.cashier?.email === 'string' && s.cashier.email.trim()) ||
         undefined;
 
+      const paymentType =
+        typeof s?.payment?.type === 'string' && s.payment.type.trim()
+          ? s.payment.type.trim().toLowerCase()
+          : undefined;
+
+      const paymentDetails =
+        paymentType === 'split' && Array.isArray(s?.payment?.payments)
+          ? s.payment.payments
+              .map((paymentPart: any) => {
+                const type =
+                  typeof paymentPart?.type === 'string' &&
+                  paymentPart.type.trim()
+                    ? paymentPart.type.trim().toLowerCase()
+                    : undefined;
+                const amountRaw =
+                  typeof paymentPart?.amount === 'number'
+                    ? paymentPart.amount
+                    : typeof paymentPart?.amountPaid === 'number'
+                      ? paymentPart.amountPaid
+                      : typeof paymentPart?.value === 'number'
+                        ? paymentPart.value
+                        : typeof paymentPart?.total === 'number'
+                          ? paymentPart.total
+                          : 0;
+                const cashReceivedRaw =
+                  typeof paymentPart?.cashReceived === 'number'
+                    ? paymentPart.cashReceived
+                    : typeof paymentPart?.received === 'number'
+                      ? paymentPart.received
+                      : undefined;
+
+                if (!type) return undefined;
+
+                return {
+                  type,
+                  amount: Math.abs(amountRaw),
+                  ...(typeof cashReceivedRaw === 'number'
+                    ? { cashReceived: Math.abs(cashReceivedRaw) }
+                    : {}),
+                };
+              })
+              .filter(Boolean)
+          : undefined;
+
       return {
         id: String(s?._id ?? ''),
         receiptNo: String(s?.receiptNo ?? ''),
@@ -2246,6 +2361,8 @@ export class SalesService {
           s?.transactionType === SaleTransactionType.Refund
             ? ('Refund' as const)
             : ('Sale' as const),
+        paymentType,
+        paymentDetails,
         total: totalNum,
         currency: String(s?.currency ?? 'PHP'),
         items: Array.isArray(s?.items) ? s.items : [],
@@ -2279,11 +2396,47 @@ export class SalesService {
       $convert: { input, to: 'double', onError: 0, onNull: 0 },
     });
 
-    const paymentTypeExpr = {
+    const paymentTypeExpr = (input: any) => ({
       $toLower: {
-        $trim: { input: { $ifNull: ['$payment.type', ''] } },
+        $trim: { input: { $ifNull: [input, ''] } },
       },
-    };
+    });
+
+    const splitPaymentAmount = (prefix: string) =>
+      num({
+        $ifNull: [
+          `${prefix}.amount`,
+          {
+            $ifNull: [
+              `${prefix}.amountPaid`,
+              {
+                $ifNull: [
+                  `${prefix}.value`,
+                  {
+                    $ifNull: [
+                      `${prefix}.total`,
+                      { $ifNull: [`${prefix}.cashReceived`, 0] },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+
+    const splitCashReceived = (prefix: string) =>
+      num({
+        $ifNull: [
+          `${prefix}.cashReceived`,
+          {
+            $ifNull: [
+              `${prefix}.received`,
+              { $ifNull: [`${prefix}.amountPaid`, splitPaymentAmount(prefix)] },
+            ],
+          },
+        ],
+      });
 
     const pipeline: any[] = [
       { $match: match },
@@ -2335,12 +2488,78 @@ export class SalesService {
                     ],
                   }),
                 },
-                __paymentType: paymentTypeExpr,
+                __paymentType: paymentTypeExpr('$payment.type'),
                 __isRefund: {
                   $eq: ['$transactionType', SaleTransactionType.Refund],
                 },
                 __currency: {
                   $trim: { input: { $ifNull: ['$currency', 'PHP'] } },
+                },
+              },
+            },
+            {
+              $addFields: {
+                __splitCashPayments: {
+                  $filter: {
+                    input: { $ifNull: ['$payment.payments', []] },
+                    as: 'paymentPart',
+                    cond: {
+                      $eq: [paymentTypeExpr('$$paymentPart.type'), 'cash'],
+                    },
+                  },
+                },
+              },
+            },
+            {
+              $addFields: {
+                __splitCashAmount: {
+                  $sum: {
+                    $map: {
+                      input: '$__splitCashPayments',
+                      as: 'paymentPart',
+                      in: { $abs: splitPaymentAmount('$$paymentPart') },
+                    },
+                  },
+                },
+                __splitCashReceived: {
+                  $sum: {
+                    $map: {
+                      input: '$__splitCashPayments',
+                      as: 'paymentPart',
+                      in: { $abs: splitCashReceived('$$paymentPart') },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              $addFields: {
+                __hasCashPayment: {
+                  $cond: [
+                    { $eq: ['$__paymentType', 'split'] },
+                    { $gt: ['$__splitCashAmount', 0] },
+                    { $eq: ['$__paymentType', 'cash'] },
+                  ],
+                },
+                __cashAmount: {
+                  $cond: [
+                    { $eq: ['$__paymentType', 'split'] },
+                    '$__splitCashAmount',
+                    {
+                      $cond: [
+                        { $eq: ['$__paymentType', 'cash'] },
+                        '$__amount',
+                        0,
+                      ],
+                    },
+                  ],
+                },
+                __cashTendered: {
+                  $cond: [
+                    { $eq: ['$__paymentType', 'split'] },
+                    '$__splitCashReceived',
+                    '$__cashReceived',
+                  ],
                 },
               },
             },
@@ -2368,11 +2587,11 @@ export class SalesService {
                     $cond: [
                       {
                         $and: [
-                          { $eq: ['$__paymentType', 'cash'] },
+                          '$__hasCashPayment',
                           { $eq: ['$__isRefund', false] },
                         ],
                       },
-                      '$__amount',
+                      '$__cashAmount',
                       0,
                     ],
                   },
@@ -2382,11 +2601,11 @@ export class SalesService {
                     $cond: [
                       {
                         $and: [
-                          { $eq: ['$__paymentType', 'cash'] },
+                          '$__hasCashPayment',
                           { $eq: ['$__isRefund', true] },
                         ],
                       },
-                      '$__amount',
+                      '$__cashAmount',
                       0,
                     ],
                   },
@@ -2396,11 +2615,11 @@ export class SalesService {
                     $cond: [
                       {
                         $and: [
-                          { $eq: ['$__paymentType', 'cash'] },
+                          '$__hasCashPayment',
                           { $eq: ['$__isRefund', false] },
                         ],
                       },
-                      '$__cashReceived',
+                      '$__cashTendered',
                       0,
                     ],
                   },
@@ -2410,7 +2629,7 @@ export class SalesService {
                     $cond: [
                       {
                         $and: [
-                          { $eq: ['$__paymentType', 'cash'] },
+                          '$__hasCashPayment',
                           { $eq: ['$__isRefund', false] },
                         ],
                       },
@@ -2470,6 +2689,157 @@ export class SalesService {
               },
             },
           ],
+          payments: [
+            {
+              $addFields: {
+                __amount: {
+                  $abs: num({
+                    $ifNull: [
+                      '$totals.amountDue',
+                      { $ifNull: ['$totals.amountPaid', 0] },
+                    ],
+                  }),
+                },
+                __cashReceived: {
+                  $abs: num({
+                    $ifNull: [
+                      '$payment.cashReceived',
+                      { $ifNull: ['$totals.amountPaid', 0] },
+                    ],
+                  }),
+                },
+                __changeGiven: { $abs: num('$totals.change') },
+                __paymentType: paymentTypeExpr('$payment.type'),
+                __isRefund: {
+                  $eq: ['$transactionType', SaleTransactionType.Refund],
+                },
+              },
+            },
+            {
+              $addFields: {
+                __paymentEntries: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $eq: ['$__paymentType', 'split'] },
+                        { $isArray: '$payment.payments' },
+                        { $gt: [{ $size: '$payment.payments' }, 0] },
+                      ],
+                    },
+                    {
+                      $map: {
+                        input: '$payment.payments',
+                        as: 'paymentPart',
+                        in: {
+                          type: {
+                            $let: {
+                              vars: { t: paymentTypeExpr('$$paymentPart.type') },
+                              in: {
+                                $cond: [
+                                  { $gt: [{ $strLenCP: '$$t' }, 0] },
+                                  '$$t',
+                                  'unknown',
+                                ],
+                              },
+                            },
+                          },
+                          amount: {
+                            $abs: splitPaymentAmount('$$paymentPart'),
+                          },
+                          cashReceived: {
+                            $abs: splitCashReceived('$$paymentPart'),
+                          },
+                        },
+                      },
+                    },
+                    [
+                      {
+                        type: {
+                          $cond: [
+                            { $gt: [{ $strLenCP: '$__paymentType' }, 0] },
+                            '$__paymentType',
+                            'unknown',
+                          ],
+                        },
+                        amount: '$__amount',
+                        cashReceived: '$__cashReceived',
+                      },
+                    ],
+                  ],
+                },
+              },
+            },
+            { $unwind: '$__paymentEntries' },
+            {
+              $group: {
+                _id: '$__paymentEntries.type',
+                sales: {
+                  $sum: {
+                    $cond: ['$__isRefund', 0, '$__paymentEntries.amount'],
+                  },
+                },
+                refunds: {
+                  $sum: {
+                    $cond: ['$__isRefund', '$__paymentEntries.amount', 0],
+                  },
+                },
+                transactions: {
+                  $sum: { $cond: ['$__isRefund', 0, 1] },
+                },
+                refundTransactions: {
+                  $sum: { $cond: ['$__isRefund', 1, 0] },
+                },
+                cashReceived: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $eq: ['$__paymentEntries.type', 'cash'] },
+                          { $eq: ['$__isRefund', false] },
+                        ],
+                      },
+                      '$__paymentEntries.cashReceived',
+                      0,
+                    ],
+                  },
+                },
+                changeGiven: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $eq: ['$__paymentEntries.type', 'cash'] },
+                          { $eq: ['$__isRefund', false] },
+                        ],
+                      },
+                      '$__changeGiven',
+                      0,
+                    ],
+                  },
+                },
+              },
+            },
+            {
+              $project: {
+                _id: 0,
+                type: '$_id',
+                sales: 1,
+                refunds: 1,
+                net: { $subtract: ['$sales', '$refunds'] },
+                transactions: 1,
+                refundTransactions: 1,
+                cashReceived: 1,
+                changeGiven: 1,
+                cashCollected: {
+                  $subtract: [
+                    { $subtract: ['$cashReceived', '$changeGiven'] },
+                    '$refunds',
+                  ],
+                },
+              },
+            },
+            { $sort: { net: -1, sales: -1, type: 1 } },
+          ],
         },
       },
     ];
@@ -2493,6 +2863,25 @@ export class SalesService {
     const changeGiven = Number(summary?.changeGiven ?? 0);
     const cashCollected = Number(summary?.cashCollected ?? 0);
     const netCash = Number(summary?.netCash ?? 0);
+    const payments = ((facet.payments ?? []) as any[]).map((p) => {
+      const type = String(p?.type ?? 'unknown');
+      const row: EndOfDayPaymentBreakdown = {
+        type,
+        sales: Number(p?.sales ?? 0),
+        refunds: Number(p?.refunds ?? 0),
+        net: Number(p?.net ?? 0),
+        transactions: Number(p?.transactions ?? 0),
+        refundTransactions: Number(p?.refundTransactions ?? 0),
+      };
+
+      if (type === 'cash') {
+        row.cashReceived = Number(p?.cashReceived ?? 0);
+        row.changeGiven = Number(p?.changeGiven ?? 0);
+        row.cashCollected = Number(p?.cashCollected ?? 0);
+      }
+
+      return row;
+    });
 
     return {
       from: from.toISOString(),
@@ -2517,6 +2906,7 @@ export class SalesService {
         changeGiven,
         cashCollected,
       },
+      payments,
     };
   }
 }

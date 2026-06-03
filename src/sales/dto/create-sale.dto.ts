@@ -1,6 +1,7 @@
 export type SalePaymentDto = {
   type?: string;
   cashReceived?: number;
+  payments?: any[];
 };
 
 export type SaleTotalsDto = {

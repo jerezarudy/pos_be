@@ -29,6 +29,8 @@ export type DeletedItemAuditLog = AuditLog & {
   updatedAt?: Date;
   itemId?: string;
   itemName?: string;
+  storeId?: string;
+  storeName?: string;
   action: 'deleted';
   user?: Record<string, unknown>;
   item?: Record<string, unknown>;
@@ -414,11 +416,24 @@ export class AuditLogsService {
       rawItemName === undefined || rawItemName === null
         ? undefined
         : String(rawItemName).trim() || undefined;
+    const rawStoreId = row?.storeId ?? row?.item?.storeId;
+    const storeId =
+      rawStoreId === undefined || rawStoreId === null
+        ? undefined
+        : String(rawStoreId).trim() || undefined;
+    const rawStoreName =
+      row?.storeName ?? row?.store?.name ?? row?.item?.store?.name;
+    const storeName =
+      rawStoreName === undefined || rawStoreName === null
+        ? undefined
+        : String(rawStoreName).trim() || undefined;
 
     return {
       ...(row as AuditLog),
       itemId,
       itemName,
+      storeId,
+      storeName,
       action: 'deleted',
       user:
         row?.user && typeof row.user === 'object' && !Array.isArray(row.user)

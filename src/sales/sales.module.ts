@@ -10,6 +10,7 @@ import {
   ReceiptCounterSchema,
 } from './schemas/receipt-counter.schema';
 import { Sale, SaleSchema } from './schemas/sale.schema';
+import { Store, StoreSchema } from '../stores/schemas/store.schema';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { Sale, SaleSchema } from './schemas/sale.schema';
     MongooseModule.forFeature([
       { name: ReceiptCounter.name, schema: ReceiptCounterSchema },
     ]),
+    MongooseModule.forFeature([{ name: Store.name, schema: StoreSchema }]),
   ],
   controllers: [SalesController],
   providers: [SalesService],

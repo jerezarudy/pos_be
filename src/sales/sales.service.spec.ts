@@ -4,6 +4,7 @@ import { SaleTransactionType } from './schemas/sale.schema';
 describe('SalesService', () => {
   let service: SalesService;
   let saleModel: any;
+  let storeModel: any;
   let usersService: any;
   let itemsService: any;
 
@@ -18,6 +19,9 @@ describe('SalesService', () => {
       aggregate: jest.fn(),
       db: {},
     };
+    storeModel = {
+      find: jest.fn(),
+    };
     usersService = {
       findOne: jest.fn().mockResolvedValue({ name: 'Test Cashier' }),
       listSalesEmployees: jest.fn(),
@@ -29,6 +33,7 @@ describe('SalesService', () => {
 
     service = new SalesService(
       saleModel,
+      storeModel,
       {} as any,
       {} as any,
       usersService,
@@ -281,6 +286,23 @@ describe('SalesService', () => {
     saleModel.countDocuments.mockReturnValue({
       exec: jest.fn().mockResolvedValue(1),
     });
+    storeModel.find.mockReturnValue({
+      select: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockReturnThis(),
+      exec: jest.fn().mockResolvedValue([
+        {
+          _id: 'store-1',
+          name: 'Main Store',
+          address: '123 Main St',
+          city: 'Manila',
+          province: 'Metro Manila',
+          postalCode: '1000',
+          country: 'Philippines',
+          phone: '09171234567',
+          description: 'Primary branch',
+        },
+      ]),
+    });
 
     const result = await service.findAll(
       { page: '1', limit: '10', type: 'refund' },
@@ -293,6 +315,17 @@ describe('SalesService', () => {
       receiptNumber: '20260319000001',
       refundReceiptNumber: '20260319000004',
       sourceSaleId: 'sale-1',
+      storeDetails: {
+        id: 'store-1',
+        name: 'Main Store',
+        address: '123 Main St',
+        city: 'Manila',
+        province: 'Metro Manila',
+        postalCode: '1000',
+        country: 'Philippines',
+        phone: '09171234567',
+        description: 'Primary branch',
+      },
     });
   });
 

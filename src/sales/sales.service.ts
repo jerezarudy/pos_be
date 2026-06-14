@@ -36,6 +36,7 @@ import {
   Customer,
   CustomerDocument,
 } from '../customers/schemas/customer.schema';
+import { Store, StoreDocument } from '../stores/schemas/store.schema';
 import {
   ReceiptCounter,
   ReceiptCounterDocument,
@@ -56,6 +57,8 @@ export class SalesService {
   constructor(
     @InjectModel(Sale.name)
     private readonly saleModel: Model<SaleDocument>,
+    @InjectModel(Store.name)
+    private readonly storeModel: Model<StoreDocument>,
     @InjectModel(Customer.name)
     private readonly customerModel: Model<CustomerDocument>,
     @InjectModel(ReceiptCounter.name)
@@ -175,6 +178,25 @@ export class SalesService {
     const normalized = String(posId ?? '').trim();
     if (!normalized) throw new BadRequestException('Sale is missing posId');
     return `${normalized}-refund`;
+  }
+
+  private normalizeStoreDetails(store: any) {
+    if (!store) return undefined;
+
+    return {
+      id: String(store?._id ?? '').trim() || undefined,
+      name: typeof store?.name === 'string' ? store.name : undefined,
+      address: typeof store?.address === 'string' ? store.address : undefined,
+      city: typeof store?.city === 'string' ? store.city : undefined,
+      province:
+        typeof store?.province === 'string' ? store.province : undefined,
+      postalCode:
+        typeof store?.postalCode === 'string' ? store.postalCode : undefined,
+      country: typeof store?.country === 'string' ? store.country : undefined,
+      phone: typeof store?.phone === 'string' ? store.phone : undefined,
+      description:
+        typeof store?.description === 'string' ? store.description : undefined,
+    };
   }
 
   private async resolveCashier(user: any) {
@@ -997,6 +1019,45 @@ export class SalesService {
       this.saleModel.countDocuments(filter).exec(),
     ]);
 
+    const shouldIncludeStoreDetails =
+      transactionType === SaleTransactionType.Refund;
+
+    const storeIds = shouldIncludeStoreDetails
+      ? Array.from(
+          new Set(
+            data
+              .map((sale: any) => String(sale?.storeId ?? '').trim())
+              .filter((id: string) => id.length > 0),
+          ),
+        )
+      : [];
+
+    const storeDetailsMap =
+      storeIds.length > 0
+        ? new Map(
+            (
+              await this.storeModel
+                .find({ _id: { $in: storeIds } })
+                .select({
+                  _id: 1,
+                  name: 1,
+                  address: 1,
+                  city: 1,
+                  province: 1,
+                  postalCode: 1,
+                  country: 1,
+                  phone: 1,
+                  description: 1,
+                })
+                .lean()
+                .exec()
+            ).map((store: any) => [
+              String(store?._id ?? '').trim(),
+              this.normalizeStoreDetails(store),
+            ]),
+          )
+        : new Map<string, any>();
+
     const refundSourceSaleIds = data
       .filter(
         (sale: any) => sale?.transactionType === SaleTransactionType.Refund,
@@ -1028,6 +1089,8 @@ export class SalesService {
     const enrichedData = data.map((sale: any) => {
       const sourceSaleId = String(sale?.sourceSaleId ?? '').trim();
       const sourceReceiptNumber = sourceReceiptMap.get(sourceSaleId);
+      const storeId = String(sale?.storeId ?? '').trim();
+      const storeDetails = storeDetailsMap.get(storeId);
       const plainSale =
         typeof sale?.toObject === 'function' ? sale.toObject() : { ...sale };
 
@@ -1039,10 +1102,14 @@ export class SalesService {
           ...plainSale,
           refundReceiptNumber: plainSale.receiptNumber,
           receiptNumber: sourceReceiptNumber,
+          ...(storeDetails ? { storeDetails } : {}),
         };
       }
 
-      return plainSale;
+      return {
+        ...plainSale,
+        ...(storeDetails ? { storeDetails } : {}),
+      };
     });
 
     return {

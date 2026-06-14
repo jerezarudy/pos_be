@@ -6,6 +6,7 @@ describe('AuditLogInterceptor', () => {
   let interceptor: AuditLogInterceptor;
   let auditLogsService: { create: jest.Mock };
   let itemModel: any;
+  let storeModel: any;
 
   beforeEach(() => {
     auditLogsService = {
@@ -14,8 +15,15 @@ describe('AuditLogInterceptor', () => {
     itemModel = {
       findById: jest.fn(),
     };
+    storeModel = {
+      findById: jest.fn(),
+    };
 
-    interceptor = new AuditLogInterceptor(auditLogsService as any, itemModel);
+    interceptor = new AuditLogInterceptor(
+      auditLogsService as any,
+      itemModel,
+      storeModel,
+    );
   });
 
   function createHttpContext(req: any, res: any): ExecutionContext {
@@ -128,8 +136,19 @@ describe('AuditLogInterceptor', () => {
           exec: jest.fn().mockResolvedValue({
             _id: 'item-3',
             name: 'Deleted Cola',
+            storeId: 'store-1',
             inStock: 8,
             trackStock: true,
+          }),
+        }),
+      }),
+    });
+    storeModel.findById.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockReturnValue({
+          exec: jest.fn().mockResolvedValue({
+            _id: 'store-1',
+            name: 'Main Store',
           }),
         }),
       }),
@@ -166,6 +185,8 @@ describe('AuditLogInterceptor', () => {
       expect.objectContaining({
         resourceId: 'item-3',
         resourceName: 'Deleted Cola',
+        storeId: 'store-1',
+        storeName: 'Main Store',
         beforeStock: 8,
         beforeTrackStock: true,
       }),

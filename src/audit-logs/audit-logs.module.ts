@@ -6,12 +6,14 @@ import { AuditLogInterceptor } from './audit-log.interceptor';
 import { AuditLogsService } from './audit-logs.service';
 import { AuditLog, AuditLogSchema } from './schemas/audit-log.schema';
 import { Item, ItemSchema } from '../items/schemas/item.schema';
+import { Store, StoreSchema } from '../stores/schemas/store.schema';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: AuditLog.name, schema: AuditLogSchema },
       { name: Item.name, schema: ItemSchema },
+      { name: Store.name, schema: StoreSchema },
     ]),
   ],
   controllers: [AuditLogsController],

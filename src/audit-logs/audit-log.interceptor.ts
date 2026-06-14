@@ -12,6 +12,7 @@ import { catchError, tap } from 'rxjs/operators';
 import { AuditLogsService } from './audit-logs.service';
 import { requestContext } from '../common/request-context';
 import { Item, ItemDocument } from '../items/schemas/item.schema';
+import { Store, StoreDocument } from '../stores/schemas/store.schema';
 
 const SENSITIVE_KEYS = new Set([
   'password',
@@ -36,6 +37,8 @@ type StockSnapshot = {
 type ItemAuditContext = {
   resourceId?: string;
   resourceName?: string;
+  storeId?: string;
+  storeName?: string;
   stockSnapshot: StockSnapshot;
 };
 
@@ -85,6 +88,32 @@ function extractResourceId(value: unknown): string | undefined {
 }
 
 function extractResourceName(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const raw = record.name ?? record.title ?? record.label;
+  if (raw === undefined || raw === null) return undefined;
+
+  const normalized = String(raw).trim();
+  return normalized || undefined;
+}
+
+function extractStoreId(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const raw = record.storeId;
+  if (raw === undefined || raw === null) return undefined;
+
+  const normalized = String(raw).trim();
+  return normalized || undefined;
+}
+
+function extractStoreName(value: unknown): string | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
   }
@@ -163,6 +192,8 @@ export class AuditLogInterceptor implements NestInterceptor {
     private readonly auditLogsService: AuditLogsService,
     @InjectModel(Item.name)
     private readonly itemModel: Model<ItemDocument>,
+    @InjectModel(Store.name)
+    private readonly storeModel: Model<StoreDocument>,
   ) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
@@ -227,14 +258,29 @@ export class AuditLogInterceptor implements NestInterceptor {
       (stockAuditRequest || itemDeleteRequest) && requestedItemId
         ? this.itemModel
             .findById(requestedItemId)
-            .select({ name: 1, inStock: 1, trackStock: 1 })
+            .select({ name: 1, storeId: 1, inStock: 1, trackStock: 1 })
             .lean()
             .exec()
-            .then((item) => ({
-              resourceId: extractResourceId(item),
-              resourceName: extractResourceName(item),
-              stockSnapshot: extractStockSnapshot(item),
-            }))
+            .then(async (item) => {
+              const storeId = itemDeleteRequest ? extractStoreId(item) : undefined;
+              const store =
+                storeId !== undefined
+                  ? await this.storeModel
+                      .findById(storeId)
+                      .select({ name: 1 })
+                      .lean()
+                      .exec()
+                      .catch(() => undefined)
+                  : undefined;
+
+              return {
+                resourceId: extractResourceId(item),
+                resourceName: extractResourceName(item),
+                storeId,
+                storeName: extractStoreName(store),
+                stockSnapshot: extractStockSnapshot(item),
+              };
+            })
             .catch(
               () =>
                 ({
@@ -271,6 +317,8 @@ export class AuditLogInterceptor implements NestInterceptor {
           userRole: user.userRole,
           resourceId: resourceId ?? beforeItem.resourceId,
           resourceName: resourceName ?? beforeItem.resourceName,
+          storeId: beforeItem.storeId,
+          storeName: beforeItem.storeName,
           beforeStock: isFiniteNumber(beforeSnapshot.stock)
             ? beforeSnapshot.stock
             : undefined,

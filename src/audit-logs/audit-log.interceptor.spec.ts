@@ -89,11 +89,22 @@ describe('AuditLogInterceptor', () => {
   });
 
   it('logs after stock snapshots for item creation', async () => {
+    storeModel.findById.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockReturnValue({
+          exec: jest.fn().mockResolvedValue({
+            _id: 'store-1',
+            name: 'Main Store',
+          }),
+        }),
+      }),
+    });
+
     const req = {
       method: 'POST',
       originalUrl: '/items',
       params: {},
-      body: { inStock: 10, trackStock: true },
+      body: { inStock: 10, trackStock: true, storeId: 'store-1' },
       query: {},
       headers: {},
       ip: '127.0.0.1',
@@ -125,6 +136,8 @@ describe('AuditLogInterceptor', () => {
         afterStock: 10,
         beforeTrackStock: undefined,
         afterTrackStock: true,
+        storeId: 'store-1',
+        storeName: 'Main Store',
       }),
     );
   });

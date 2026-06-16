@@ -14,6 +14,8 @@ export type ItemStockAuditLog = AuditLog & {
   createdAt?: Date;
   updatedAt?: Date;
   itemId?: string;
+  storeId?: string;
+  storeName?: string;
   stockAction: 'created' | 'updated';
   beforeStock?: number;
   afterStock?: number;
@@ -171,6 +173,36 @@ export class AuditLogsService {
               $addFields: {
                 user: { $arrayElemAt: ['$user', 0] },
                 item: { $arrayElemAt: ['$item', 0] },
+              },
+            },
+            {
+              $lookup: {
+                from: 'stores',
+                let: {
+                  auditStoreId: { $ifNull: ['$storeId', '$item.storeId'] },
+                },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $eq: [{ $toString: '$_id' }, '$$auditStoreId'],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      __v: 0,
+                    },
+                  },
+                ],
+                as: 'store',
+              },
+            },
+            {
+              $addFields: {
+                store: { $arrayElemAt: ['$store', 0] },
+                storeId: { $ifNull: ['$storeId', '$item.storeId'] },
+                storeName: { $ifNull: ['$storeName', '$store.name'] },
               },
             },
           ],
@@ -392,6 +424,14 @@ export class AuditLogsService {
         typeof row?.afterTrackStock === 'boolean'
           ? row.afterTrackStock
           : undefined,
+      storeId:
+        row?.storeId === undefined || row?.storeId === null
+          ? undefined
+          : String(row.storeId).trim() || undefined,
+      storeName:
+        row?.storeName === undefined || row?.storeName === null
+          ? undefined
+          : String(row.storeName).trim() || undefined,
       user:
         row?.user && typeof row.user === 'object' && !Array.isArray(row.user)
           ? row.user

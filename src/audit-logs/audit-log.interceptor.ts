@@ -262,7 +262,7 @@ export class AuditLogInterceptor implements NestInterceptor {
             .lean()
             .exec()
             .then(async (item) => {
-              const storeId = itemDeleteRequest ? extractStoreId(item) : undefined;
+              const storeId = extractStoreId(item);
               const store =
                 storeId !== undefined
                   ? await this.storeModel
@@ -292,6 +292,8 @@ export class AuditLogInterceptor implements NestInterceptor {
           } as ItemAuditContext);
     let resourceId: string | undefined;
     let resourceName: string | undefined;
+    let resolvedStoreId: string | undefined = extractStoreId(body);
+    let resolvedStoreName: string | undefined = extractStoreName(body);
     let afterSnapshot: StockSnapshot = {};
 
     const writeLog = async (
@@ -305,6 +307,17 @@ export class AuditLogInterceptor implements NestInterceptor {
       try {
         const beforeItem = await beforeItemPromise;
         const beforeSnapshot = beforeItem.stockSnapshot;
+        const storeId = resolvedStoreId ?? beforeItem.storeId;
+        let storeName = resolvedStoreName ?? beforeItem.storeName;
+        if (storeId && !storeName) {
+          storeName = await this.storeModel
+            .findById(storeId)
+            .select({ name: 1 })
+            .lean()
+            .exec()
+            .then((store) => extractStoreName(store))
+            .catch(() => undefined);
+        }
         await this.auditLogsService.create({
           timestamp,
           method,
@@ -317,8 +330,6 @@ export class AuditLogInterceptor implements NestInterceptor {
           userRole: user.userRole,
           resourceId: resourceId ?? beforeItem.resourceId,
           resourceName: resourceName ?? beforeItem.resourceName,
-          storeId: beforeItem.storeId,
-          storeName: beforeItem.storeName,
           beforeStock: isFiniteNumber(beforeSnapshot.stock)
             ? beforeSnapshot.stock
             : undefined,
@@ -333,6 +344,8 @@ export class AuditLogInterceptor implements NestInterceptor {
             typeof afterSnapshot.trackStock === 'boolean'
               ? afterSnapshot.trackStock
               : undefined,
+          storeId,
+          storeName,
           params,
           query,
           body,
@@ -352,6 +365,16 @@ export class AuditLogInterceptor implements NestInterceptor {
             const sanitizedResponseBody = sanitize(responseBody);
             resourceId = extractResourceId(sanitizedResponseBody);
             resourceName = extractResourceName(sanitizedResponseBody);
+            const responseStoreId = extractStoreId(sanitizedResponseBody);
+            const responseStoreName = extractStoreName(sanitizedResponseBody);
+            const requestStoreId = extractStoreId(body);
+            const requestStoreName = extractStoreName(body);
+            if (responseStoreId || requestStoreId) {
+              resolvedStoreId = responseStoreId ?? requestStoreId;
+            }
+            if (responseStoreName || requestStoreName) {
+              resolvedStoreName = responseStoreName ?? requestStoreName;
+            }
             afterSnapshot = extractStockSnapshot(sanitizedResponseBody);
           },
           complete: () => {

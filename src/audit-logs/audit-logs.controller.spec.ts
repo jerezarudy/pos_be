@@ -5,6 +5,7 @@ import { AuditLogsService } from './audit-logs.service';
 describe('AuditLogsController', () => {
   let controller: AuditLogsController;
   const auditLogsService = {
+    findItemCrudLogs: jest.fn(),
     findItemStockChanges: jest.fn(),
     findDeletedItems: jest.fn(),
   };
@@ -34,6 +35,14 @@ describe('AuditLogsController', () => {
     controller.findItemStockChanges(query);
 
     expect(auditLogsService.findItemStockChanges).toHaveBeenCalledWith(query);
+  });
+
+  it('delegates item CRUD audit log lookups to the service', () => {
+    const query = { page: '1', limit: '1000', action: 'updated' };
+
+    controller.findItemCrudLogs(query);
+
+    expect(auditLogsService.findItemCrudLogs).toHaveBeenCalledWith(query);
   });
 
   it('delegates deleted item audit log lookups to the service', () => {

@@ -33,7 +33,19 @@ export class AuditLog {
   userId?: string;
 
   @Prop({ trim: true })
+  userName?: string;
+
+  @Prop({ trim: true })
   userRole?: string;
+
+  @Prop({ trim: true, enum: ['created', 'updated', 'deleted'] })
+  action?: 'created' | 'updated' | 'deleted';
+
+  @Prop({ trim: true })
+  itemId?: string;
+
+  @Prop({ trim: true })
+  itemName?: string;
 
   @Prop({ trim: true })
   resourceId?: string;

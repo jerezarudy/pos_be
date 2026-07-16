@@ -7,6 +7,11 @@ import { AuditLogsService } from './audit-logs.service';
 export class AuditLogsController {
   constructor(private readonly auditLogsService: AuditLogsService) {}
 
+  @Get('items')
+  findItemCrudLogs(@Query() query: any) {
+    return this.auditLogsService.findItemCrudLogs(query);
+  }
+
   @Get('items/stock')
   findItemStockChanges(@Query() query: any) {
     return this.auditLogsService.findItemStockChanges(query);

@@ -13,6 +13,7 @@ import { AuditLogsService } from './audit-logs.service';
 import { requestContext } from '../common/request-context';
 import { Item, ItemDocument } from '../items/schemas/item.schema';
 import { Store, StoreDocument } from '../stores/schemas/store.schema';
+import { User, UserDocument } from '../users/schemas/user.schema';
 
 const SENSITIVE_KEYS = new Set([
   'password',
@@ -81,7 +82,9 @@ function extractResourceId(value: unknown): string | undefined {
 
   const record = value as Record<string, unknown>;
   const raw = record._id ?? record.id;
-  if (raw === undefined || raw === null) return undefined;
+  if (raw === undefined || raw === null) {
+    return extractResourceId(record._doc);
+  }
 
   const normalized = String(raw).trim();
   return normalized || undefined;
@@ -94,7 +97,9 @@ function extractResourceName(value: unknown): string | undefined {
 
   const record = value as Record<string, unknown>;
   const raw = record.name ?? record.title ?? record.label;
-  if (raw === undefined || raw === null) return undefined;
+  if (raw === undefined || raw === null) {
+    return extractResourceName(record._doc);
+  }
 
   const normalized = String(raw).trim();
   return normalized || undefined;
@@ -107,7 +112,9 @@ function extractStoreId(value: unknown): string | undefined {
 
   const record = value as Record<string, unknown>;
   const raw = record.storeId;
-  if (raw === undefined || raw === null) return undefined;
+  if (raw === undefined || raw === null) {
+    return extractStoreId(record._doc);
+  }
 
   const normalized = String(raw).trim();
   return normalized || undefined;
@@ -186,6 +193,21 @@ function isItemDeleteRequest(method: string, path: string) {
   return method === 'DELETE' && ITEM_DELETE_PATH_REGEX.test(path);
 }
 
+function getItemCrudAction(
+  method: string,
+  path: string,
+): 'created' | 'updated' | 'deleted' | undefined {
+  if (method === 'POST' && ITEM_CREATE_PATH_REGEX.test(path)) return 'created';
+  if (
+    (method === 'PATCH' || method === 'PUT') &&
+    ITEM_UPDATE_PATH_REGEX.test(path)
+  ) {
+    return 'updated';
+  }
+  if (isItemDeleteRequest(method, path)) return 'deleted';
+  return undefined;
+}
+
 @Injectable()
 export class AuditLogInterceptor implements NestInterceptor {
   constructor(
@@ -194,6 +216,8 @@ export class AuditLogInterceptor implements NestInterceptor {
     private readonly itemModel: Model<ItemDocument>,
     @InjectModel(Store.name)
     private readonly storeModel: Model<StoreDocument>,
+    @InjectModel(User.name)
+    private readonly userModel: Model<UserDocument>,
   ) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
@@ -221,29 +245,37 @@ export class AuditLogInterceptor implements NestInterceptor {
       const directUserRole = req?.user?.role
         ? String(req.user.role)
         : undefined;
-      if (directUserId || directUserRole) {
-        return { userId: directUserId, userRole: directUserRole };
+      const directUserName = req?.user?.name ? String(req.user.name) : undefined;
+      if (directUserId || directUserRole || directUserName) {
+        return {
+          userId: directUserId,
+          userName: directUserName,
+          userRole: directUserRole,
+        };
       }
 
       const authHeader: string | undefined =
         req?.headers?.authorization ?? req?.headers?.Authorization;
       if (!authHeader?.startsWith('Bearer ')) {
-        return { userId: undefined, userRole: undefined };
+        return { userId: undefined, userName: undefined, userRole: undefined };
       }
 
       const token = authHeader.slice('Bearer '.length).trim();
       const parts = token.split('.');
-      if (parts.length < 2) return { userId: undefined, userRole: undefined };
+      if (parts.length < 2) {
+        return { userId: undefined, userName: undefined, userRole: undefined };
+      }
 
       try {
         const payloadJson = Buffer.from(parts[1], 'base64url').toString('utf8');
         const payload: any = JSON.parse(payloadJson);
         return {
           userId: payload?.sub ? String(payload.sub) : undefined,
+          userName: payload?.name ? String(payload.name) : undefined,
           userRole: payload?.role ? String(payload.role) : undefined,
         };
       } catch {
-        return { userId: undefined, userRole: undefined };
+        return { userId: undefined, userName: undefined, userRole: undefined };
       }
     };
 
@@ -251,11 +283,11 @@ export class AuditLogInterceptor implements NestInterceptor {
     const query = sanitize(req?.query) as Record<string, unknown> | undefined;
     const body = sanitize(req?.body);
     const stockAuditRequest = isStockAuditRequest(method, path, body);
-    const itemDeleteRequest = isItemDeleteRequest(method, path);
+    const itemCrudAction = getItemCrudAction(method, path);
     const requestedItemId =
       typeof req?.params?.id === 'string' ? req.params.id.trim() : undefined;
     const beforeItemPromise: Promise<ItemAuditContext> =
-      (stockAuditRequest || itemDeleteRequest) && requestedItemId
+      (stockAuditRequest || itemCrudAction) && requestedItemId
         ? this.itemModel
             .findById(requestedItemId)
             .select({ name: 1, storeId: 1, inStock: 1, trackStock: 1 })
@@ -293,11 +325,13 @@ export class AuditLogInterceptor implements NestInterceptor {
     let resourceId: string | undefined;
     let resourceName: string | undefined;
     let resolvedStoreId: string | undefined = extractStoreId(body);
-    let resolvedStoreName: string | undefined = extractStoreName(body);
+    let resolvedStoreName: string | undefined = itemCrudAction
+      ? undefined
+      : extractStoreName(body);
     let afterSnapshot: StockSnapshot = {};
 
     const writeLog = async (
-      user: { userId?: string; userRole?: string },
+      user: { userId?: string; userName?: string; userRole?: string },
       data: {
         statusCode?: number;
         durationMs?: number;
@@ -309,6 +343,7 @@ export class AuditLogInterceptor implements NestInterceptor {
         const beforeSnapshot = beforeItem.stockSnapshot;
         const storeId = resolvedStoreId ?? beforeItem.storeId;
         let storeName = resolvedStoreName ?? beforeItem.storeName;
+        let userName = user.userName;
         if (storeId && !storeName) {
           storeName = await this.storeModel
             .findById(storeId)
@@ -318,6 +353,17 @@ export class AuditLogInterceptor implements NestInterceptor {
             .then((store) => extractStoreName(store))
             .catch(() => undefined);
         }
+        if (itemCrudAction && user.userId && !userName) {
+          userName = await this.userModel
+            .findById(user.userId)
+            .select({ name: 1 })
+            .lean()
+            .exec()
+            .then((foundUser) => extractResourceName(foundUser))
+            .catch(() => undefined);
+        }
+        const itemId = resourceId ?? beforeItem.resourceId;
+        const itemName = resourceName ?? beforeItem.resourceName;
         await this.auditLogsService.create({
           timestamp,
           method,
@@ -327,9 +373,13 @@ export class AuditLogInterceptor implements NestInterceptor {
           ip: ip || undefined,
           userAgent: userAgent || undefined,
           userId: user.userId,
+          userName,
           userRole: user.userRole,
-          resourceId: resourceId ?? beforeItem.resourceId,
-          resourceName: resourceName ?? beforeItem.resourceName,
+          action: itemCrudAction,
+          itemId: itemCrudAction ? itemId : undefined,
+          itemName: itemCrudAction ? itemName : undefined,
+          resourceId: itemId,
+          resourceName: itemName,
           beforeStock: isFiniteNumber(beforeSnapshot.stock)
             ? beforeSnapshot.stock
             : undefined,
@@ -364,15 +414,19 @@ export class AuditLogInterceptor implements NestInterceptor {
           next: (responseBody) => {
             const sanitizedResponseBody = sanitize(responseBody);
             resourceId = extractResourceId(sanitizedResponseBody);
-            resourceName = extractResourceName(sanitizedResponseBody);
+            resourceName =
+              extractResourceName(sanitizedResponseBody) ??
+              (itemCrudAction ? extractResourceName(body) : undefined);
             const responseStoreId = extractStoreId(sanitizedResponseBody);
             const responseStoreName = extractStoreName(sanitizedResponseBody);
             const requestStoreId = extractStoreId(body);
-            const requestStoreName = extractStoreName(body);
+            const requestStoreName = itemCrudAction
+              ? undefined
+              : extractStoreName(body);
             if (responseStoreId || requestStoreId) {
               resolvedStoreId = responseStoreId ?? requestStoreId;
             }
-            if (responseStoreName || requestStoreName) {
+            if (!itemCrudAction && (responseStoreName || requestStoreName)) {
               resolvedStoreName = responseStoreName ?? requestStoreName;
             }
             afterSnapshot = extractStockSnapshot(sanitizedResponseBody);

@@ -7,6 +7,7 @@ import { AuditLogsService } from './audit-logs.service';
 import { AuditLog, AuditLogSchema } from './schemas/audit-log.schema';
 import { Item, ItemSchema } from '../items/schemas/item.schema';
 import { Store, StoreSchema } from '../stores/schemas/store.schema';
+import { User, UserSchema } from '../users/schemas/user.schema';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { Store, StoreSchema } from '../stores/schemas/store.schema';
       { name: AuditLog.name, schema: AuditLogSchema },
       { name: Item.name, schema: ItemSchema },
       { name: Store.name, schema: StoreSchema },
+      { name: User.name, schema: UserSchema },
     ]),
   ],
   controllers: [AuditLogsController],

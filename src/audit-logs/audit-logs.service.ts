@@ -38,6 +38,18 @@ export type DeletedItemAuditLog = AuditLog & {
   item?: Record<string, unknown>;
 };
 
+export type ItemCrudAuditLog = {
+  id: string;
+  itemId?: string;
+  itemName?: string;
+  storeId?: string;
+  storeName?: string;
+  userId?: string;
+  userName?: string;
+  action: 'created' | 'updated' | 'deleted';
+  createdAt?: Date;
+};
+
 @Injectable()
 export class AuditLogsService {
   constructor(
@@ -47,6 +59,27 @@ export class AuditLogsService {
 
   async create(entry: Omit<AuditLog, never>) {
     return this.auditLogModel.create(entry);
+  }
+
+  async findItemCrudLogs(query?: any): Promise<PaginationResult<ItemCrudAuditLog>> {
+    const { page, limit, skip } = parsePagination(query, {
+      defaultLimit: 1000,
+      maxLimit: 1000,
+    });
+    const pipeline = this.buildItemCrudLogsPipeline(query, skip, limit);
+    const [result] = await this.auditLogModel.aggregate(pipeline).exec();
+    const rows = Array.isArray(result?.data) ? result.data : [];
+    const total = Number(result?.total?.[0]?.count ?? 0);
+    const data = rows.map((row) => this.mapItemCrudAuditLog(row as any));
+
+    return {
+      data,
+      page,
+      limit,
+      total,
+      hasNext: skip + data.length < total,
+      hasPrev: page > 1,
+    };
   }
 
   async findItemStockChanges(query?: any): Promise<PaginationResult<ItemStockAuditLog>> {
@@ -214,6 +247,157 @@ export class AuditLogsService {
     return pipeline;
   }
 
+  private buildItemCrudLogsPipeline(
+    query: any,
+    skip: number,
+    limit: number,
+  ): PipelineStage[] {
+    const pipeline: PipelineStage[] = [
+      {
+        $match: this.buildItemCrudLogsMatch(query),
+      },
+      {
+        $addFields: {
+          action: {
+            $ifNull: [
+              '$action',
+              {
+                $switch: {
+                  branches: [
+                    { case: { $eq: ['$method', 'POST'] }, then: 'created' },
+                    { case: { $eq: ['$method', 'DELETE'] }, then: 'deleted' },
+                  ],
+                  default: 'updated',
+                },
+              },
+            ],
+          },
+          itemId: {
+            $ifNull: ['$itemId', { $ifNull: ['$params.id', '$resourceId'] }],
+          },
+          itemName: {
+            $ifNull: [
+              '$itemName',
+              { $ifNull: ['$resourceName', '$body.name'] },
+            ],
+          },
+        },
+      },
+    ];
+
+    const itemId =
+      typeof query?.itemId === 'string' ? query.itemId.trim() : '';
+    if (itemId) {
+      pipeline.push({ $match: { itemId } });
+    }
+
+    const action = this.parseItemCrudAction(query?.action);
+    if (action) {
+      pipeline.push({ $match: { action } });
+    }
+
+    pipeline.push(
+      {
+        $lookup: {
+          from: 'items',
+          let: { auditItemId: '$itemId' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $eq: [{ $toString: '$_id' }, '$$auditItemId'],
+                },
+              },
+            },
+            {
+              $project: {
+                name: 1,
+                storeId: 1,
+              },
+            },
+          ],
+          as: 'item',
+        },
+      },
+      {
+        $addFields: {
+          item: { $arrayElemAt: ['$item', 0] },
+          itemName: { $ifNull: ['$itemName', '$item.name'] },
+          storeId: { $ifNull: ['$storeId', '$item.storeId'] },
+        },
+      },
+    );
+
+    const storeId =
+      typeof query?.storeId === 'string' ? query.storeId.trim() : '';
+    if (storeId) {
+      pipeline.push({ $match: { storeId } });
+    }
+
+    pipeline.push(
+      {
+        $lookup: {
+          from: 'stores',
+          let: { auditStoreId: '$storeId' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $eq: [{ $toString: '$_id' }, '$$auditStoreId'],
+                },
+              },
+            },
+            {
+              $project: {
+                name: 1,
+              },
+            },
+          ],
+          as: 'store',
+        },
+      },
+      {
+        $lookup: {
+          from: 'users',
+          let: { auditUserId: '$userId' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $eq: [{ $toString: '$_id' }, '$$auditUserId'],
+                },
+              },
+            },
+            {
+              $project: {
+                name: 1,
+              },
+            },
+          ],
+          as: 'user',
+        },
+      },
+      {
+        $addFields: {
+          store: { $arrayElemAt: ['$store', 0] },
+          user: { $arrayElemAt: ['$user', 0] },
+          storeName: { $ifNull: ['$storeName', '$store.name'] },
+          userName: { $ifNull: ['$userName', '$user.name'] },
+          createdAtForReport: { $ifNull: ['$createdAt', '$timestamp'] },
+        },
+      },
+      { $sort: { createdAtForReport: -1, timestamp: -1, _id: -1 } },
+      {
+        $facet: {
+          data: [{ $skip: skip }, { $limit: limit }],
+          total: [{ $count: 'count' }],
+        },
+      },
+    );
+
+    return pipeline;
+  }
+
   private buildDeletedItemsPipeline(
     query: any,
     skip: number,
@@ -305,6 +489,54 @@ export class AuditLogsService {
     );
 
     return pipeline;
+  }
+
+  private buildItemCrudLogsMatch(
+    query?: any,
+  ): FilterQuery<AuditLogDocument> {
+    const action = this.parseItemCrudAction(query?.action);
+    const pathFilters: FilterQuery<AuditLogDocument>[] =
+      action === 'created'
+        ? [{ method: 'POST', path: ITEM_CREATE_PATH_REGEX }]
+        : action === 'updated'
+          ? [{ method: { $in: ['PATCH', 'PUT'] }, path: ITEM_UPDATE_PATH_REGEX }]
+          : action === 'deleted'
+            ? [{ method: 'DELETE', path: ITEM_DELETE_PATH_REGEX }]
+            : [
+                { method: 'POST', path: ITEM_CREATE_PATH_REGEX },
+                {
+                  method: { $in: ['PATCH', 'PUT'] },
+                  path: ITEM_UPDATE_PATH_REGEX,
+                },
+                { method: 'DELETE', path: ITEM_DELETE_PATH_REGEX },
+              ];
+
+    const filters: FilterQuery<AuditLogDocument>[] = [
+      { $or: pathFilters },
+      {
+        $or: [
+          { statusCode: { $gte: 200, $lt: 300 } },
+          { statusCode: { $exists: false } },
+        ],
+      },
+    ];
+
+    const userId =
+      typeof query?.userId === 'string' ? query.userId.trim() : '';
+    if (userId) {
+      filters.push({ userId });
+    }
+
+    const from = this.parseDate(query?.from ?? query?.startDate);
+    const to = this.parseDate(query?.to ?? query?.endDate, true);
+    if (from || to) {
+      const timestamp: Record<string, Date> = {};
+      if (from) timestamp.$gte = from;
+      if (to) timestamp.$lte = to;
+      filters.push({ timestamp });
+    }
+
+    return filters.length === 1 ? filters[0] : { $and: filters };
   }
 
   private buildItemStockChangesMatch(
@@ -399,6 +631,49 @@ export class AuditLogsService {
     if (Number.isNaN(parsed.getTime())) return undefined;
 
     return parsed;
+  }
+
+  private parseItemCrudAction(
+    value: unknown,
+  ): 'created' | 'updated' | 'deleted' | undefined {
+    if (typeof value !== 'string') return undefined;
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'created' ||
+      normalized === 'updated' ||
+      normalized === 'deleted'
+      ? normalized
+      : undefined;
+  }
+
+  private mapItemCrudAuditLog(row: Record<string, any>): ItemCrudAuditLog {
+    const createdAt = row?.createdAtForReport ?? row?.createdAt ?? row?.timestamp;
+    const itemId = this.normalizeReportString(row?.itemId);
+
+    return {
+      id:
+        row?._id === undefined || row?._id === null
+          ? ''
+          : String(row._id).trim(),
+      itemId,
+      itemName: this.normalizeReportString(row?.itemName),
+      storeId: this.normalizeReportString(row?.storeId),
+      storeName: this.normalizeReportString(row?.storeName),
+      userId: this.normalizeReportString(row?.userId),
+      userName: this.normalizeReportString(row?.userName),
+      action: this.parseItemCrudAction(row?.action) ?? 'updated',
+      createdAt:
+        createdAt === undefined || createdAt === null
+          ? undefined
+          : new Date(createdAt),
+    };
+  }
+
+  private normalizeReportString(value: unknown) {
+    if (value === undefined || value === null) return undefined;
+    const normalized = String(value).trim();
+    return normalized && normalized !== '[object Object]'
+      ? normalized
+      : undefined;
   }
 
   private mapItemStockAuditLog(row: Record<string, any>): ItemStockAuditLog {

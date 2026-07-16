@@ -33,7 +33,7 @@ describe('AuditLogsService', () => {
             itemId: 'item-4',
             itemName: 'BLACK V2 POD - YKT / YAKULT',
             storeId: 'store-1',
-            storeName: 'SILAY BODEGA',
+            store: { _id: 'store-1', name: 'SILAY BODEGA' },
             userId: 'user-1',
             userName: 'Admin',
             createdAtForReport: new Date('2026-07-17T10:25:00.000Z'),
@@ -81,6 +81,25 @@ describe('AuditLogsService', () => {
         { $match: { itemId: 'item-4' } },
         { $match: { action: 'updated' } },
         { $match: { storeId: 'store-1' } },
+      ]),
+    );
+    expect(pipeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          $lookup: expect.objectContaining({
+            from: 'stores',
+            let: {
+              auditStoreId: expect.objectContaining({
+                $convert: expect.objectContaining({
+                  to: 'string',
+                  onError: null,
+                  onNull: null,
+                }),
+              }),
+            },
+            as: 'store',
+          }),
+        }),
       ]),
     );
     expect(result).toEqual({

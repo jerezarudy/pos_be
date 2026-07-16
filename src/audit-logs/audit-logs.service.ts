@@ -338,7 +338,22 @@ export class AuditLogsService {
       {
         $lookup: {
           from: 'stores',
-          let: { auditStoreId: '$storeId' },
+          let: {
+            auditStoreId: {
+              $convert: {
+                input: {
+                  $cond: [
+                    { $isArray: '$storeId' },
+                    { $arrayElemAt: ['$storeId', 0] },
+                    '$storeId',
+                  ],
+                },
+                to: 'string',
+                onError: null,
+                onNull: null,
+              },
+            },
+          },
           pipeline: [
             {
               $match: {
@@ -648,6 +663,9 @@ export class AuditLogsService {
   private mapItemCrudAuditLog(row: Record<string, any>): ItemCrudAuditLog {
     const createdAt = row?.createdAtForReport ?? row?.createdAt ?? row?.timestamp;
     const itemId = this.normalizeReportString(row?.itemId);
+    const storeName = this.normalizeReportString(
+      row?.storeName ?? row?.store?.name,
+    );
 
     return {
       id:
@@ -657,7 +675,7 @@ export class AuditLogsService {
       itemId,
       itemName: this.normalizeReportString(row?.itemName),
       storeId: this.normalizeReportString(row?.storeId),
-      storeName: this.normalizeReportString(row?.storeName),
+      storeName,
       userId: this.normalizeReportString(row?.userId),
       userName: this.normalizeReportString(row?.userName),
       action: this.parseItemCrudAction(row?.action) ?? 'updated',

@@ -29,8 +29,6 @@ describe('AuditLogsService', () => {
             path: '/items/item-1/stock',
             params: { id: 'item-1' },
             itemId: 'item-1',
-            storeId: 'store-1',
-            storeName: 'Main Store',
             beforeStock: 3,
             afterStock: 25,
             beforeTrackStock: false,
@@ -38,7 +36,6 @@ describe('AuditLogsService', () => {
             body: { inStock: 25 },
             user: { _id: 'user-1', name: 'Cashier 1', role: 'cashier' },
             item: { _id: 'item-1', name: 'Cola', inStock: 25 },
-            store: { _id: 'store-1', name: 'Main Store' },
           },
         ],
         total: [{ count: 1 }],
@@ -81,9 +78,6 @@ describe('AuditLogsService', () => {
         expect.objectContaining({
           $lookup: expect.objectContaining({ from: 'items', as: 'item' }),
         }),
-        expect.objectContaining({
-          $lookup: expect.objectContaining({ from: 'stores', as: 'store' }),
-        }),
       ]),
     );
     expect(result).toEqual({
@@ -91,8 +85,6 @@ describe('AuditLogsService', () => {
         expect.objectContaining({
           _id: 'log-1',
           itemId: 'item-1',
-          storeId: 'store-1',
-          storeName: 'Main Store',
           stockAction: 'updated',
           beforeStock: 3,
           afterStock: 25,
@@ -121,13 +113,10 @@ describe('AuditLogsService', () => {
             path: '/items',
             resourceId: 'item-2',
             itemId: 'item-2',
-            storeId: 'store-2',
-            storeName: 'Outlet 2',
             afterStock: 10,
             afterTrackStock: true,
             body: { trackStock: true, inStock: 10 },
             item: { _id: 'item-2', name: 'Sprite' },
-            store: { _id: 'store-2', name: 'Outlet 2' },
           },
         ],
         total: [{ count: 1 }],
@@ -145,8 +134,6 @@ describe('AuditLogsService', () => {
         beforeTrackStock: undefined,
         afterTrackStock: true,
         item: { _id: 'item-2', name: 'Sprite' },
-        storeId: 'store-2',
-        storeName: 'Outlet 2',
       }),
     );
   });

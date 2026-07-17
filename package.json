@@ -10,7 +10,6 @@
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "seed:user": "ts-node -r tsconfig-paths/register scripts/seed-user.ts",
     "migrate:item-category": "ts-node -r tsconfig-paths/register scripts/migrate-item-category.ts",
-    "backfill:item-audit-logs": "ts-node -r tsconfig-paths/register scripts/backfill-item-audit-logs.ts",
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",

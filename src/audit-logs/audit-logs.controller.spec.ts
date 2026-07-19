@@ -7,6 +7,7 @@ describe('AuditLogsController', () => {
   const auditLogsService = {
     findItemStockChanges: jest.fn(),
     findDeletedItems: jest.fn(),
+    findItemLogs: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -42,5 +43,13 @@ describe('AuditLogsController', () => {
     controller.findDeletedItems(query);
 
     expect(auditLogsService.findDeletedItems).toHaveBeenCalledWith(query);
+  });
+
+  it('delegates item log report lookups to the service', () => {
+    const query = { page: '1', transactionType: 'edit' };
+
+    controller.findItemLogs(query);
+
+    expect(auditLogsService.findItemLogs).toHaveBeenCalledWith(query);
   });
 });

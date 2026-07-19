@@ -42,7 +42,26 @@ type ItemAuditContext = {
   stockSnapshot: StockSnapshot;
 };
 
+function normalizeAuditObject(value: unknown): unknown {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value;
+
+  const maybeDocument = value as {
+    toObject?: (options?: Record<string, unknown>) => unknown;
+  };
+  if (typeof maybeDocument.toObject === 'function') {
+    try {
+      return maybeDocument.toObject({ getters: true, virtuals: false });
+    } catch {
+      return value;
+    }
+  }
+
+  return value;
+}
+
 function sanitize(value: unknown, depth = 0): unknown {
+  value = normalizeAuditObject(value);
   if (value === null || value === undefined) return value;
   if (depth > 4) return '[Truncated]';
   if (
@@ -120,6 +139,23 @@ function extractStoreName(value: unknown): string | undefined {
 
   const record = value as Record<string, unknown>;
   const raw = record.name ?? record.title ?? record.label;
+  if (raw === undefined || raw === null) return undefined;
+
+  const normalized = String(raw).trim();
+  return normalized || undefined;
+}
+
+function extractPayloadStoreName(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const nestedStore =
+    record.store && typeof record.store === 'object' && !Array.isArray(record.store)
+      ? (record.store as Record<string, unknown>)
+      : undefined;
+  const raw = record.storeName ?? nestedStore?.name;
   if (raw === undefined || raw === null) return undefined;
 
   const normalized = String(raw).trim();
@@ -292,6 +328,8 @@ export class AuditLogInterceptor implements NestInterceptor {
           } as ItemAuditContext);
     let resourceId: string | undefined;
     let resourceName: string | undefined;
+    let resolvedStoreId: string | undefined = extractStoreId(body);
+    let resolvedStoreName: string | undefined = extractPayloadStoreName(body);
     let afterSnapshot: StockSnapshot = {};
 
     const writeLog = async (
@@ -305,6 +343,17 @@ export class AuditLogInterceptor implements NestInterceptor {
       try {
         const beforeItem = await beforeItemPromise;
         const beforeSnapshot = beforeItem.stockSnapshot;
+        const storeId = beforeItem.storeId ?? resolvedStoreId;
+        let storeName = beforeItem.storeName ?? resolvedStoreName;
+        if (storeId && !storeName) {
+          storeName = await this.storeModel
+            .findById(storeId)
+            .select({ name: 1 })
+            .lean()
+            .exec()
+            .then((store) => extractStoreName(store))
+            .catch(() => undefined);
+        }
         await this.auditLogsService.create({
           timestamp,
           method,
@@ -317,8 +366,8 @@ export class AuditLogInterceptor implements NestInterceptor {
           userRole: user.userRole,
           resourceId: resourceId ?? beforeItem.resourceId,
           resourceName: resourceName ?? beforeItem.resourceName,
-          storeId: beforeItem.storeId,
-          storeName: beforeItem.storeName,
+          storeId,
+          storeName,
           beforeStock: isFiniteNumber(beforeSnapshot.stock)
             ? beforeSnapshot.stock
             : undefined,
@@ -352,6 +401,17 @@ export class AuditLogInterceptor implements NestInterceptor {
             const sanitizedResponseBody = sanitize(responseBody);
             resourceId = extractResourceId(sanitizedResponseBody);
             resourceName = extractResourceName(sanitizedResponseBody);
+            const responseStoreId = extractStoreId(sanitizedResponseBody);
+            const responseStoreName =
+              extractPayloadStoreName(sanitizedResponseBody);
+            const requestStoreId = extractStoreId(body);
+            const requestStoreName = extractPayloadStoreName(body);
+            if (responseStoreId || requestStoreId) {
+              resolvedStoreId = responseStoreId ?? requestStoreId;
+            }
+            if (responseStoreName || requestStoreName) {
+              resolvedStoreName = responseStoreName ?? requestStoreName;
+            }
             afterSnapshot = extractStockSnapshot(sanitizedResponseBody);
           },
           complete: () => {

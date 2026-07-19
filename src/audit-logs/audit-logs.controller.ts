@@ -16,4 +16,9 @@ export class AuditLogsController {
   findDeletedItems(@Query() query: any) {
     return this.auditLogsService.findDeletedItems(query);
   }
+
+  @Get('items/logs')
+  findItemLogs(@Query() query: any) {
+    return this.auditLogsService.findItemLogs(query);
+  }
 }

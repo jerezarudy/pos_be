@@ -129,6 +129,62 @@ describe('AuditLogInterceptor', () => {
     );
   });
 
+  it('extracts created item details from mongoose document responses', async () => {
+    storeModel.findById.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockReturnValue({
+          exec: jest.fn().mockResolvedValue({
+            _id: 'store-1',
+            name: 'Main Store',
+          }),
+        }),
+      }),
+    });
+
+    const req = {
+      method: 'POST',
+      originalUrl: '/items',
+      params: {},
+      body: {},
+      query: {},
+      headers: {},
+      ip: '127.0.0.1',
+      user: { sub: 'user-1', role: 'admin' },
+    };
+    const res = { statusCode: 201 };
+    const next = {
+      handle: () =>
+        of({
+          toObject: () => ({
+            _id: 'item-2',
+            name: 'Bottled Water',
+            storeId: 'store-1',
+            inStock: 15,
+            trackStock: true,
+          }),
+        }),
+    };
+
+    await new Promise<void>((resolve, reject) => {
+      interceptor.intercept(createHttpContext(req, res), next as any).subscribe({
+        complete: () => resolve(),
+        error: reject,
+      });
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(auditLogsService.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resourceId: 'item-2',
+        resourceName: 'Bottled Water',
+        afterStock: 15,
+        afterTrackStock: true,
+        storeId: 'store-1',
+        storeName: 'Main Store',
+      }),
+    );
+  });
+
   it('logs deleted item identity so details remain available after removal', async () => {
     itemModel.findById.mockReturnValue({
       select: jest.fn().mockReturnValue({

@@ -36,6 +36,21 @@ export type DeletedItemAuditLog = AuditLog & {
   item?: Record<string, unknown>;
 };
 
+export type ItemLogReportRow = {
+  _id?: unknown;
+  itemId?: string;
+  itemName?: string;
+  transactionDate?: Date;
+  transactionType: 'create' | 'edit' | 'delete';
+  quantity?: number;
+  userId?: string;
+  userName?: string;
+  user?: Record<string, unknown>;
+  storeId?: string;
+  storeName?: string;
+  item?: Record<string, unknown>;
+};
+
 @Injectable()
 export class AuditLogsService {
   constructor(
@@ -50,7 +65,6 @@ export class AuditLogsService {
   async findItemStockChanges(query?: any): Promise<PaginationResult<ItemStockAuditLog>> {
     const { page, limit, skip } = parsePagination(query, {
       defaultLimit: 20,
-      maxLimit: 200,
     });
     const pipeline = this.buildItemStockChangesPipeline(query, skip, limit);
     const [result] = await this.auditLogModel.aggregate(pipeline).exec();
@@ -78,6 +92,26 @@ export class AuditLogsService {
     const rows = Array.isArray(result?.data) ? result.data : [];
     const total = Number(result?.total?.[0]?.count ?? 0);
     const data = rows.map((row) => this.mapDeletedItemAuditLog(row as any));
+
+    return {
+      data,
+      page,
+      limit,
+      total,
+      hasNext: skip + data.length < total,
+      hasPrev: page > 1,
+    };
+  }
+
+  async findItemLogs(query?: any): Promise<PaginationResult<ItemLogReportRow>> {
+    const { page, limit, skip } = parsePagination(query, {
+      defaultLimit: 20,
+    });
+    const pipeline = this.buildItemLogsPipeline(query, skip, limit);
+    const [result] = await this.auditLogModel.aggregate(pipeline).exec();
+    const rows = Array.isArray(result?.data) ? result.data : [];
+    const total = Number(result?.total?.[0]?.count ?? 0);
+    const data = rows.map((row) => this.mapItemLogReportRow(row as any));
 
     return {
       data,
@@ -275,6 +309,260 @@ export class AuditLogsService {
     return pipeline;
   }
 
+  private buildItemLogsPipeline(
+    query: any,
+    skip: number,
+    limit: number,
+  ): PipelineStage[] {
+    const pipeline: PipelineStage[] = [
+      {
+        $match: this.buildItemLogsMatch(query),
+      },
+      {
+        $addFields: {
+          itemId: { $ifNull: ['$params.id', '$resourceId'] },
+          transactionType: {
+            $switch: {
+              branches: [
+                { case: { $eq: ['$method', 'POST'] }, then: 'create' },
+                { case: { $eq: ['$method', 'DELETE'] }, then: 'delete' },
+              ],
+              default: 'edit',
+            },
+          },
+          transactionDate: '$timestamp',
+          quantity: {
+            $ifNull: [
+              '$afterStock',
+              {
+                $ifNull: [
+                  '$body.inStock',
+                  {
+                    $ifNull: ['$body.quantity', '$beforeStock'],
+                  },
+                ],
+              },
+            ],
+          },
+          itemName: { $ifNull: ['$resourceName', '$body.name'] },
+        },
+      },
+    ];
+
+    const itemId =
+      typeof query?.itemId === 'string' ? query.itemId.trim() : '';
+    if (itemId) {
+      pipeline.push({
+        $match: { itemId },
+      });
+    }
+
+    const transactionType =
+      typeof query?.transactionType === 'string'
+        ? query.transactionType.trim().toLowerCase()
+        : '';
+    if (['create', 'edit', 'delete'].includes(transactionType)) {
+      pipeline.push({
+        $match: { transactionType },
+      });
+    }
+
+    pipeline.push(
+      {
+        $lookup: {
+          from: 'audit_logs',
+          let: {
+            auditItemId: '$itemId',
+            auditUserId: '$userId',
+            auditTimestamp: '$timestamp',
+            auditMethod: '$method',
+            auditPath: '$path',
+          },
+          pipeline: [
+            {
+              $match: {
+                method: 'PATCH',
+                path: ITEM_STOCK_PATH_REGEX,
+                $expr: {
+                  $and: [
+                    {
+                      $in: ['$$auditMethod', ['PATCH', 'PUT']],
+                    },
+                    {
+                      $regexMatch: {
+                        input: '$$auditPath',
+                        regex: ITEM_UPDATE_PATH_REGEX,
+                      },
+                    },
+                    {
+                      $eq: [
+                        {
+                          $ifNull: ['$params.id', '$resourceId'],
+                        },
+                        '$$auditItemId',
+                      ],
+                    },
+                    {
+                      $eq: ['$userId', '$$auditUserId'],
+                    },
+                    {
+                      $gte: ['$timestamp', '$$auditTimestamp'],
+                    },
+                    {
+                      $lte: [
+                        '$timestamp',
+                        {
+                          $dateAdd: {
+                            startDate: '$$auditTimestamp',
+                            unit: 'second',
+                            amount: 2,
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+            { $limit: 1 },
+            { $project: { _id: 1 } },
+          ],
+          as: 'supersedingStockLog',
+        },
+      },
+      {
+        $match: {
+          supersedingStockLog: { $eq: [] },
+        },
+      },
+    );
+
+    pipeline.push(
+      { $sort: { timestamp: -1, createdAt: -1 } },
+      {
+        $facet: {
+          data: [
+            { $skip: skip },
+            { $limit: limit },
+            {
+              $lookup: {
+                from: 'users',
+                let: { auditUserId: '$userId' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $eq: [{ $toString: '$_id' }, '$$auditUserId'],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      passwordHash: 0,
+                      pos_pin: 0,
+                      __v: 0,
+                    },
+                  },
+                ],
+                as: 'user',
+              },
+            },
+            {
+              $lookup: {
+                from: 'items',
+                let: { auditItemId: '$itemId' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $eq: [{ $toString: '$_id' }, '$$auditItemId'],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      __v: 0,
+                    },
+                  },
+                ],
+                as: 'item',
+              },
+            },
+            {
+              $addFields: {
+                user: { $arrayElemAt: ['$user', 0] },
+                item: { $arrayElemAt: ['$item', 0] },
+              },
+            },
+            {
+              $lookup: {
+                from: 'stores',
+                let: {
+                  auditStoreId: { $ifNull: ['$storeId', '$item.storeId'] },
+                },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $eq: [{ $toString: '$_id' }, '$$auditStoreId'],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      __v: 0,
+                    },
+                  },
+                ],
+                as: 'store',
+              },
+            },
+            {
+              $addFields: {
+                store: { $arrayElemAt: ['$store', 0] },
+                itemName: { $ifNull: ['$itemName', '$item.name'] },
+                quantity: {
+                  $ifNull: [
+                    '$afterStock',
+                    {
+                      $cond: [
+                        { $eq: ['$transactionType', 'delete'] },
+                        {
+                          $ifNull: [
+                            '$beforeStock',
+                            {
+                              $ifNull: ['$body.inStock', '$body.quantity'],
+                            },
+                          ],
+                        },
+                        {
+                          $ifNull: ['$body.inStock', '$body.quantity'],
+                        },
+                      ],
+                    },
+                  ],
+                },
+                storeId: { $ifNull: ['$storeId', '$item.storeId'] },
+                storeName: { $ifNull: ['$storeName', '$store.name'] },
+                userName: {
+                  $ifNull: [
+                    '$user.name',
+                    {
+                      $ifNull: ['$user.username', '$user.email'],
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+          total: [{ $count: 'count' }],
+        },
+      },
+    );
+
+    return pipeline;
+  }
+
   private buildItemStockChangesMatch(
     query?: any,
   ): FilterQuery<AuditLogDocument> {
@@ -311,6 +599,12 @@ export class AuditLogsService {
       filters.push({ userId });
     }
 
+    const storeId =
+      typeof query?.storeId === 'string' ? query.storeId.trim() : '';
+    if (storeId) {
+      filters.push({ storeId });
+    }
+
     const from = this.parseDate(query?.from ?? query?.startDate);
     const to = this.parseDate(query?.to ?? query?.endDate, true);
     if (from || to) {
@@ -337,6 +631,54 @@ export class AuditLogsService {
       typeof query?.userId === 'string' ? query.userId.trim() : '';
     if (userId) {
       filters.push({ userId });
+    }
+
+    const from = this.parseDate(query?.from ?? query?.startDate);
+    const to = this.parseDate(query?.to ?? query?.endDate, true);
+    if (from || to) {
+      const timestamp: Record<string, Date> = {};
+      if (from) timestamp.$gte = from;
+      if (to) timestamp.$lte = to;
+      filters.push({ timestamp });
+    }
+
+    return filters.length === 1 ? filters[0] : { $and: filters };
+  }
+
+  private buildItemLogsMatch(query?: any): FilterQuery<AuditLogDocument> {
+    const filters: FilterQuery<AuditLogDocument>[] = [
+      {
+        $or: [
+          {
+            method: 'POST',
+            path: ITEM_CREATE_PATH_REGEX,
+          },
+          {
+            method: { $in: ['PATCH', 'PUT'] },
+            path: ITEM_UPDATE_PATH_REGEX,
+          },
+          {
+            method: 'PATCH',
+            path: ITEM_STOCK_PATH_REGEX,
+          },
+          {
+            method: 'DELETE',
+            path: ITEM_DELETE_PATH_REGEX,
+          },
+        ],
+      },
+    ];
+
+    const userId =
+      typeof query?.userId === 'string' ? query.userId.trim() : '';
+    if (userId) {
+      filters.push({ userId });
+    }
+
+    const storeId =
+      typeof query?.storeId === 'string' ? query.storeId.trim() : '';
+    if (storeId) {
+      filters.push({ storeId });
     }
 
     const from = this.parseDate(query?.from ?? query?.startDate);
@@ -439,6 +781,84 @@ export class AuditLogsService {
         row?.user && typeof row.user === 'object' && !Array.isArray(row.user)
           ? row.user
           : undefined,
+      item:
+        row?.item && typeof row.item === 'object' && !Array.isArray(row.item)
+          ? row.item
+          : undefined,
+    };
+  }
+
+  private mapItemLogReportRow(row: Record<string, any>): ItemLogReportRow {
+    const rawItemId = row?.itemId ?? row?.params?.id ?? row?.resourceId;
+    const itemId =
+      rawItemId === undefined || rawItemId === null
+        ? undefined
+        : String(rawItemId).trim() || undefined;
+    const rawItemName = row?.itemName ?? row?.resourceName ?? row?.item?.name;
+    const itemName =
+      rawItemName === undefined || rawItemName === null
+        ? undefined
+        : String(rawItemName).trim() || undefined;
+    const rawQuantity =
+      row?.quantity ??
+      row?.afterStock ??
+      row?.body?.inStock ??
+      row?.body?.quantity ??
+      row?.beforeStock;
+    const quantity =
+      typeof rawQuantity === 'number'
+        ? rawQuantity
+        : rawQuantity === undefined || rawQuantity === null || rawQuantity === ''
+          ? undefined
+          : Number(rawQuantity);
+    const rawStoreId = row?.storeId ?? row?.item?.storeId;
+    const storeId =
+      rawStoreId === undefined || rawStoreId === null
+        ? undefined
+        : String(rawStoreId).trim() || undefined;
+    const rawStoreName =
+      row?.storeName ?? row?.store?.name ?? row?.item?.store?.name;
+    const storeName =
+      rawStoreName === undefined || rawStoreName === null
+        ? undefined
+        : String(rawStoreName).trim() || undefined;
+    const rawUserName =
+      row?.userName ?? row?.user?.name ?? row?.user?.username ?? row?.user?.email;
+    const userName =
+      rawUserName === undefined || rawUserName === null
+        ? undefined
+        : String(rawUserName).trim() || undefined;
+
+    return {
+      _id: row?._id,
+      itemId,
+      itemName,
+      transactionDate: row?.transactionDate ?? row?.timestamp,
+      transactionType:
+        row?.transactionType === 'create' ||
+        row?.transactionType === 'edit' ||
+        row?.transactionType === 'delete'
+          ? row.transactionType
+          : row?.method === 'POST'
+            ? 'create'
+            : row?.method === 'DELETE'
+              ? 'delete'
+              : 'edit',
+      quantity:
+        typeof quantity === 'number' && Number.isFinite(quantity)
+          ? quantity
+          : undefined,
+      userId:
+        row?.userId === undefined || row?.userId === null
+          ? undefined
+          : String(row.userId).trim() || undefined,
+      userName,
+      user:
+        row?.user && typeof row.user === 'object' && !Array.isArray(row.user)
+          ? row.user
+          : undefined,
+      storeId,
+      storeName,
       item:
         row?.item && typeof row.item === 'object' && !Array.isArray(row.item)
           ? row.item
